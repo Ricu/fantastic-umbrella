@@ -1,0 +1,15 @@
+
+
+sparse coding (new)
+
+### training algorithm
+dropout
+early stopping
+batch normalization
+
+### sampling method
+data augmentation
+
+### affecting loss function
+l1/l2 regularization
+entropy regularization (new)
