@@ -128,3 +128,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 datasets/256_ObjectCategories.tar
+tmp/WNLI/vanillla_run/pytorch_model.bin
+tmp/WNLI/modified_run/pytorch_model.bin
