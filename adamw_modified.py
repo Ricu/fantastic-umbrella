@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from .optimizer import (Optimizer, _use_grad_for_differentiable, _get_value, _dispatch_sqrt,
+from torch.optim.optimizer import (Optimizer, _use_grad_for_differentiable, _get_value, _dispatch_sqrt,
                         _stack_if_compiling, _capturable_doc, _differentiable_doc, _foreach_doc,
                         _fused_doc, _maximize_doc, _default_to_fused_or_foreach)
 from typing import List, Optional
@@ -9,7 +9,7 @@ from torch.utils._foreach_utils import _group_tensors_by_device_and_dtype
 __all__ = ["AdamW", "adamw"]
 
 
-class AdamW(Optimizer):
+class AdamW_modified(Optimizer):
     def __init__(
         self,
         params,
@@ -18,6 +18,7 @@ class AdamW(Optimizer):
         eps=1e-8,
         weight_decay=1e-2,
         amsgrad=False,
+        reference_state=None,
         *,
         maximize: bool = False,
         foreach: Optional[bool] = None,
@@ -25,6 +26,7 @@ class AdamW(Optimizer):
         differentiable: bool = False,
         fused: Optional[bool] = None,
     ):
+        self.reference_state= reference_state
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
@@ -64,7 +66,7 @@ class AdamW(Optimizer):
                 raise RuntimeError("`fused=True` requires all the params to be CUDA, floating point Tensor")
             if foreach:
                 raise RuntimeError("`fused` and `foreach` cannot be `True` together.")
-
+        
     def __setstate__(self, state):
         super().__setstate__(state)
         for group in self.param_groups:
@@ -125,6 +127,9 @@ class AdamW(Optimizer):
                     state["max_exp_avg_sq"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
+                # # attach reference parameters
+                # if self.reference_state is not None:
+                #   state["ref_norm_exp_avg_sq"] = self.reference_state["exp_avg_sq"]
 
             exp_avgs.append(state["exp_avg"])
             exp_avg_sqs.append(state["exp_avg_sq"])
@@ -169,7 +174,7 @@ class AdamW(Optimizer):
                 state_steps,
             )
 
-            adamw(
+            adamw_modified(
                 params_with_grad,
                 grads,
                 exp_avgs,
@@ -194,7 +199,7 @@ class AdamW(Optimizer):
         return loss
 
 
-AdamW.__doc__ = r"""Implements AdamW algorithm.
+AdamW_modified.__doc__ = r"""Implements AdamW algorithm.
     .. math::
        \begin{aligned}
             &\rule{110mm}{0.4pt}                                                                 \\
@@ -258,7 +263,7 @@ AdamW.__doc__ = r"""Implements AdamW algorithm.
                differentiable=_differentiable_doc)
 
 
-def adamw(
+def adamw_modified(
     params: List[Tensor],
     grads: List[Tensor],
     exp_avgs: List[Tensor],
@@ -357,7 +362,6 @@ def _single_tensor_adamw(
 ):
 
     assert grad_scale is None and found_inf is None
-
     for i, param in enumerate(params):
         grad = grads[i] if not maximize else -grads[i]
         exp_avg = exp_avgs[i]
@@ -367,7 +371,7 @@ def _single_tensor_adamw(
         if capturable:
             assert (
                 param.is_cuda and step_t.is_cuda
-            ), "If capturable=True, params and state_steps must be CUDA tensors."
+            ), "If capturable=True, params and state_steps must be CUDA tensors." 
 
         if torch.is_complex(param):
             grad = torch.view_as_real(grad)
@@ -379,10 +383,14 @@ def _single_tensor_adamw(
         step_t += 1
         
         
+        #print(param)
         ###########################################################################################
         # Perform stepweight decay 
         # param.mul_(1 - lr * weight_decay).div_(exp_avg_pretrained)
         param.mul_(1 - lr * weight_decay)
+        
+        ###########################################################################################
+        # add pretrained weights
        
         # Decay the first and second moment running average coefficient
         exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
@@ -498,7 +506,8 @@ def _multi_tensor_adamw(
 
         # Perform stepweight decay
         torch._foreach_mul_(device_params, 1 - lr * weight_decay)
-
+        print(device_params)
+            
         # Decay the first and second moment running average coefficient
         torch._foreach_mul_(device_exp_avgs, beta1)
         torch._foreach_add_(device_exp_avgs, device_grads, alpha=1 - beta1)
