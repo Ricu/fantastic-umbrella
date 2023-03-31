@@ -1,9 +1,0 @@
-\babel@toc {ngerman}{}\relax 
-\contentsline {chapter}{\nonumberline Abbildungsverzeichnis}{iii}{chapter*.2}%
-\contentsline {chapter}{\nonumberline Tabellenverzeichnis}{iii}{chapter*.3}%
-\contentsline {chapter}{\numberline {1}Einleitung}{1}{chapter.4}%
-\contentsline {chapter}{\numberline {2}Theoretischer Hintergrund des Lösungsverfahren}{3}{chapter.5}%
-\contentsline {chapter}{\numberline {3}Neustartstrategien - Wahl des Parameter $m$}{5}{chapter.6}%
-\contentsline {chapter}{\numberline {4}Praktische Implementierung und Ergebnisse}{7}{chapter.7}%
-\contentsline {chapter}{\numberline {5}Fazit}{9}{chapter.8}%
-\providecommand \tocbasic@end@toc@file {}\tocbasic@end@toc@file 
