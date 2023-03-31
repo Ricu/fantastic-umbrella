@@ -1,9 +1,11 @@
 
+https://paperswithcode.com/methods/category/regularization
+label smoothing
+weight decay
 
-sparse coding (new)
 
 ### training algorithm
-dropout
+dropout (incl. Variational Dropout)
 early stopping
 batch normalization
 
@@ -13,3 +15,8 @@ data augmentation
 ### affecting loss function
 l1/l2 regularization
 entropy regularization (new)
+
+
+
+### probably outdated?
+stochastic depth
