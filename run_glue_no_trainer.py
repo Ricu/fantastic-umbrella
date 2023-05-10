@@ -207,8 +207,53 @@ def parse_args():
 
     return args
 
+def attach_hooks_to_layer(layer):
+    class Catch_Hook():
+        def __init__(self, module):
+            self.hook = module.register_full_backward_hook(self.hook_fn)
+
+        def hook_fn(self, module, grad_input, grad_output):
+            self.caught_grad = grad_output
+            # print('caught a gradient:')
+            # print(self.caught_grad)
+
+        def close(self):
+            self.hook.remove()
 
 
+    class Insert_Hook():
+        def __init__(self, module, insertion_enabled = True, new_grad_output=None):
+            self.new_grad_output = new_grad_output
+            # use prepend=True so that this is definetly the first hook being applied
+            self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
+            self.insertion_enabled = insertion_enabled
+
+        def hook_fn(self, module, grad_output):
+            if self.insertion_enabled:
+            # simply return the previously caught grad_output
+            # this will replace the current grad_output (if prehook is used)
+            # if non-pre hook is used, grad_input will be replaced (not desire in our case)
+                return self.new_grad_output
+
+        def update_grad(self, new_grad_output):
+            self.new_grad_output = new_grad_output
+
+        def close(self):
+            self.hook.remove()
+
+        def enable_insertion(self):
+            self.insertion_enabled = True
+
+        def disable_insertion(self):
+            self.insertion_enabled = False
+
+    #++++++++++++++++++ attach hooks to the specified layer ++++++++++++++++++++++++#
+    hooks = {}
+    hooks['catch_hook'] = Catch_Hook(layer)
+    hooks['insert_hook'] = Insert_Hook(layer)
+    #++++++++++++++++++ \attach hooks to the specified layer ++++++++++++++++++++++++#
+
+    return hooks
 
 
 def main():
@@ -320,46 +365,12 @@ def main():
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
     )
 
-    class Catch_Hook():
-        def __init__(self, module):
-            self.hook = module.register_full_backward_hook(self.hook_fn)
-
-        def hook_fn(self, module, grad_input, grad_output):
-            self.caught_grad = grad_output
-            # print('caught a gradient:')
-            # print(self.caught_grad)
-
-        def close(self):
-            self.hook.remove()
-
-
-    class Insert_Hook():
-        def __init__(self, module, new_grad_output=None):
-            self.new_grad_output = new_grad_output
-            # use prepend=True so that this is definetly the first hook being applied
-            self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
-
-        def hook_fn(self, module, grad_output):
-            if module.training:
-            # print('inserted gradient:')
-            # print(self.new_grad_output)
-            # simply return the previously caught grad_output
-            # this will replace the current grad_output (if prehook is used)
-            # if non-pre hook is used, grad_input will be replaced (not desire in our case)
-                return self.new_grad_output
-            # else:
-            #     print('skipping gradient insertion in eval mode')
-
-        def update_grad(self, new_grad_output):
-            self.new_grad_output = new_grad_output
-
-        def close(self):
-            self.hook.remove()
-
     #++++++++++++++++++ attach hooks to the last layer ++++++++++++++++++++++++#
-    # last_layer = model.classifier
-    # catch_hook = Catch_Hook(last_layer)
-    # insert_hook = Insert_Hook(last_layer)
+    layer = model.classifier
+    hooks_dict = attach_hooks_to_layer(layer)
+
+    # determine dropout_layers which will be activated later
+    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)]
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     # Preprocessing the datasets
@@ -563,23 +574,28 @@ def main():
                     completed_steps += 1
                     continue
 
-            
+            model.train()
             # #++++++++ catch unregularized gradient ++++++++#
-            # optimizer.zero_grad()
-            # model.eval()
-            # outputs = model(**batch)
-            # loss = outputs.loss
-            # accelerator.backward(loss)
-            # new_grad_output = catch_hook.caught_grad
+            # set all dropout layers to evalulation mode
+            [module.eval() for module in dropout_modules]
+            # disable gradient insertion for unregularized run
+            hooks_dict['insert_hook'].disable_insertion()
+
+            optimizer.zero_grad()
+            outputs = model(**batch)
+            loss = outputs.loss
+            accelerator.backward(loss)
+
+            # update gradient to be inserted
+            hooks_dict['insert_hook'].update_grad(hooks_dict['catch_hook'].caught_grad)
+            # reset dropout layers to train mode
+            [module.train() for module in dropout_modules]
             # #++++++++ \catch unregularized gradient ++++++++#
 
-            # #++++++++ update unregularized gradient to be inserted ++++++++#
-            # insert_hook.update_grad(new_grad_output)
-            # #++++++++ \update unregularized gradient to be inserted ++++++++#
+            # enable gradient insertion for regularized run
+            hooks_dict['insert_hook'].enable_insertion()
 
-            # model.train()
-            # optimizer.zero_grad()
-
+            optimizer.zero_grad()
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
