@@ -1,0 +1,22 @@
+Correctly substituting incoming gradients
+
+
+Hello,
+
+I want to find the best way to catch a gradient at one point and replace it at another point. 
+
+Lets assume the setting that there is a fully connected layer with output `h` and weights `W`. In the 1st pass want to catch the gradient `dL/dh` (L is the loss), which would be used to calculate the gradient for the weights (`dL/dW`).
+
+Now in the 2nd pass I want to substitute `dL*/dh` (L* is the Loss of the 2nd forward pass) by `dL/dh`. This would result in a gradient `gradient(W)=dL/dh * dh/dW`.
+
+So far I implemented this by using hooks:
+
+A `full_backward_hook` is registered on the FC layer and catches the `grad_ouput` on the first pass.
+
+A` full_backward_pre_hook` is registered on the same FC layer and reinserts the 'grad_ouput' which was caught before.
+
+
+ 
+
+
+
