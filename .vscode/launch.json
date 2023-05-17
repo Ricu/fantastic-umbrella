@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: WNLI - Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["--model_name_or_path", "bert-base-cased",
+                     "--task_name", "wnli",
+                     "--max_length", "128",
+                     "--per_device_train_batch_size", "32",
+                     "--learning_rate", "2e-5",
+                     "--num_train_epochs", "3",
+                     "--output_dir", ".\\tmp\\wnli",
+                     "--seed", "0"
+                    ]
+        }
+    ]
+}
