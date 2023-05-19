@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import math
+
 import os
 import random
 from pathlib import Path
@@ -48,7 +49,7 @@ from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.30.0.dev0")
+check_min_version("4.28.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -206,6 +207,54 @@ def parse_args():
 
     return args
 
+def attach_hooks_to_layer(layer):
+    class Catch_Hook():
+        def __init__(self, module):
+            self.hook = module.register_full_backward_hook(self.hook_fn)
+
+        def hook_fn(self, module, grad_input, grad_output):
+            self.caught_grad = grad_output
+            # print('caught a gradient:')
+            # print(self.caught_grad)
+
+        def close(self):
+            self.hook.remove()
+
+
+    class Insert_Hook():
+        def __init__(self, module, insertion_enabled = True, new_grad_output=None):
+            self.new_grad_output = new_grad_output
+            # use prepend=True so that this is definetly the first hook being applied
+            self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
+            self.insertion_enabled = insertion_enabled
+
+        def hook_fn(self, module, grad_output):
+            if self.insertion_enabled:
+            # simply return the previously caught grad_output
+            # this will replace the current grad_output (if prehook is used)
+            # if non-pre hook is used, grad_input will be replaced (not desire in our case)
+                return self.new_grad_output
+
+        def update_grad(self, new_grad_output):
+            self.new_grad_output = new_grad_output
+
+        def close(self):
+            self.hook.remove()
+
+        def enable_insertion(self):
+            self.insertion_enabled = True
+
+        def disable_insertion(self):
+            self.insertion_enabled = False
+
+    #++++++++++++++++++ attach hooks to the specified layer ++++++++++++++++++++++++#
+    hooks = {}
+    hooks['catch_hook'] = Catch_Hook(layer)
+    hooks['insert_hook'] = Insert_Hook(layer)
+    #++++++++++++++++++ \attach hooks to the specified layer ++++++++++++++++++++++++#
+
+    return hooks
+
 
 def main():
     args = parse_args()
@@ -315,6 +364,14 @@ def main():
         config=config,
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
     )
+
+    #++++++++++++++++++ attach hooks to the last layer ++++++++++++++++++++++++#
+    layer = model.classifier
+    hooks_dict = attach_hooks_to_layer(layer)
+
+    # determine dropout_layers which will be activated later
+    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)]
+    #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     # Preprocessing the datasets
     if args.task_name is not None:
@@ -516,6 +573,29 @@ def main():
                 if resume_step is not None and step < resume_step:
                     completed_steps += 1
                     continue
+
+            model.train()
+            # #++++++++ catch unregularized gradient ++++++++#
+            # set all dropout layers to evalulation mode
+            [module.eval() for module in dropout_modules]
+            # disable gradient insertion for unregularized run
+            hooks_dict['insert_hook'].disable_insertion()
+
+            optimizer.zero_grad()
+            outputs = model(**batch)
+            loss = outputs.loss
+            accelerator.backward(loss)
+
+            # update gradient to be inserted
+            hooks_dict['insert_hook'].update_grad(hooks_dict['catch_hook'].caught_grad)
+            # reset dropout layers to train mode
+            [module.train() for module in dropout_modules]
+            # #++++++++ \catch unregularized gradient ++++++++#
+
+            # enable gradient insertion for regularized run
+            hooks_dict['insert_hook'].enable_insertion()
+
+            optimizer.zero_grad()
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
