@@ -1,6 +1,6 @@
-declare -a StringArray=("mnli")
-# to be done: "qnli" "rte"  "stsb" "wnli"
-# to big:  "qqp"
+declare -a StringArray=("qnli" "rte" "stsb" "wnli")
+# to be done: 
+# to big:  "qqp" "mnli"
 # done:"cola" "sst2" "mrpc"
 for task_name in "${StringArray[@]}";
 do
