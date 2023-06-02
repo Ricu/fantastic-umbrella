@@ -189,6 +189,12 @@ def parse_args():
         action="store_true",
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
     )
+    parser.add_argument(
+        "--hidden_dropout",
+        type=float,
+        default=0.1,
+        help="Change the dropout rate of the hidden layers.",
+    )
     args = parser.parse_args()
 
     # Sanity checks
@@ -371,6 +377,11 @@ def main():
 
     # determine dropout_layers which will be activated later
     dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)]
+
+    # set the dropout rate
+    print(f'NEW DROPOUT RATE: {args.hidden_dropout}')
+    for module in dropout_modules[1:]:
+        module.p = args.hidden_dropout
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     # Preprocessing the datasets
