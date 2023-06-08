@@ -604,7 +604,7 @@ def main():
             # #++++++++ \catch unregularized gradient ++++++++#
 
             # enable gradient insertion for regularized run
-            hooks_dict['insert_hook'].enable_insertion()
+            # hooks_dict['insert_hook'].enable_insertion()
 
             optimizer.zero_grad()
             outputs = model(**batch)
@@ -720,6 +720,13 @@ def main():
         all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump(all_results, f)
+        with open(os.path.join(args.output_dir, "used_arguments.json"), "w") as f:   
+            json.dump({'modded':True,
+                       'num_train_epochs' : args.num_train_epochs,
+                       'hidden_dropout' :args.hidden_dropout
+                       },f)
+    
+
 
 
 if __name__ == "__main__":
