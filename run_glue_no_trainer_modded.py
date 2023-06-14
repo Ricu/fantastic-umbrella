@@ -17,7 +17,6 @@ import argparse
 import json
 import logging
 import math
-
 import os
 import random
 from pathlib import Path
@@ -30,7 +29,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset
 from huggingface_hub import Repository, create_repo
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from tqdm.auto import tqdm
 
 import transformers
@@ -49,7 +48,7 @@ from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.28.0.dev0")
+check_min_version("4.31.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -195,6 +194,23 @@ def parse_args():
         default=0.1,
         help="Change the dropout rate of the hidden layers.",
     )
+    parser.add_argument(
+        "--train_data_frac",
+        type=float,
+        default=1,
+        help="Change the fraction of training data used.",
+    )
+    parser.add_argument(
+        "--use_pretrain_dropout_in_first_pass",
+        action="store_true",
+        help="Wether to use the dropout rate from pretraining during the regularized run or not",
+    )
+    parser.add_argument(
+        "--use_modded",
+        action="store_true",
+        help="Wether to use gradient insertion or not",
+    )
+
     args = parser.parse_args()
 
     # Sanity checks
@@ -212,7 +228,7 @@ def parse_args():
         assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
 
     return args
-
+    
 def attach_hooks_to_layer(layer):
     class Catch_Hook():
         def __init__(self, module):
@@ -228,7 +244,7 @@ def attach_hooks_to_layer(layer):
 
 
     class Insert_Hook():
-        def __init__(self, module, insertion_enabled = True, new_grad_output=None):
+        def __init__(self, module, insertion_enabled = False, new_grad_output=None):
             self.new_grad_output = new_grad_output
             # use prepend=True so that this is definetly the first hook being applied
             self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
@@ -260,7 +276,6 @@ def attach_hooks_to_layer(layer):
     #++++++++++++++++++ \attach hooks to the specified layer ++++++++++++++++++++++++#
 
     return hooks
-
 
 def main():
     args = parse_args()
@@ -375,12 +390,13 @@ def main():
     layer = model.classifier
     hooks_dict = attach_hooks_to_layer(layer)
 
-    # determine dropout_layers which will be activated later
-    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)]
+    # determine dropout_layers which will be activated later (skip input dropout)
+    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
+    pretrain_dropouts = [module.p for module in dropout_modules]
 
     # set the dropout rate
     print(f'NEW DROPOUT RATE: {args.hidden_dropout}')
-    for module in dropout_modules[1:]:
+    for module in dropout_modules:
         module.p = args.hidden_dropout
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
@@ -456,6 +472,12 @@ def main():
         )
 
     train_dataset = processed_datasets["train"]
+
+    ########### Change number of training samples #############
+    print(f'Original number of training samples is: {len(train_dataset)}')
+    train_dataset = random_split(train_dataset,[args.train_data_frac, 1-args.train_data_frac])[0]
+    print(f'Taking a {args.train_data_frac} fraction of train_data results in {len(train_dataset)} training samples')
+    
     eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
 
     # Log a few random samples from the training set:
@@ -476,6 +498,7 @@ def main():
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
+    print(len(train_dataloader))
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     # Optimizer
@@ -569,42 +592,65 @@ def main():
         if "epoch" in training_difference:
             starting_epoch = int(training_difference.replace("epoch_", "")) + 1
             resume_step = None
+            completed_steps = starting_epoch * num_update_steps_per_epoch
         else:
-            resume_step = int(training_difference.replace("step_", ""))
+            # need to multiply `gradient_accumulation_steps` to reflect real steps
+            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
+            completed_steps = resume_step // args.gradient_accumulation_step
+
+    # update the progress_bar if load from checkpoint
+    progress_bar.update(completed_steps)
 
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         if args.with_tracking:
             total_loss = 0
-        for step, batch in enumerate(train_dataloader):
-            # We need to skip steps until we reach the resumed step
-            if args.resume_from_checkpoint and epoch == starting_epoch:
-                if resume_step is not None and step < resume_step:
-                    completed_steps += 1
-                    continue
-
+        if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
+            # We skip the first `n` batches in the dataloader when resuming from a checkpoint
+            active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+        else:
+            active_dataloader = train_dataloader
+        for step, batch in enumerate(active_dataloader):
             model.train()
-            # #++++++++ catch unregularized gradient ++++++++#
-            # set all dropout layers to evalulation mode
-            [module.eval() for module in dropout_modules]
-            # disable gradient insertion for unregularized run
-            hooks_dict['insert_hook'].disable_insertion()
+            
+            if args.use_modded:
+                # #++++++++ catch unregularized gradient ++++++++#
+                # disable gradient insertion for unregularized run
+                hooks_dict['insert_hook'].disable_insertion()
 
-            optimizer.zero_grad()
-            outputs = model(**batch)
-            loss = outputs.loss
-            accelerator.backward(loss)
+                if args.use_pretrain_dropout_in_first_pass:
+                    # use pretrain dropout during gradient catching
+                    for module, p in zip(dropout_modules,pretrain_dropouts):
+                        module.p = p
+                else:
+                    # set all dropout layers to evalulation mode
+                    [module.eval() for module in dropout_modules]
+                
+                optimizer.zero_grad()
+                outputs = model(**batch)
+                loss = outputs.loss
+                accelerator.backward(loss)
 
-            # update gradient to be inserted
-            hooks_dict['insert_hook'].update_grad(hooks_dict['catch_hook'].caught_grad)
-            # reset dropout layers to train mode
-            [module.train() for module in dropout_modules]
-            # #++++++++ \catch unregularized gradient ++++++++#
+                # update gradient to be inserted
+                hooks_dict['insert_hook'].update_grad(hooks_dict['catch_hook'].caught_grad)
 
-            # enable gradient insertion for regularized run
-            # hooks_dict['insert_hook'].enable_insertion()
+                
+                if args.use_pretrain_dropout_in_first_pass:
+                    # set new dropout during gradient insertion
+                    for module in dropout_modules:
+                        module.p = args.hidden_dropout
+                else:
+                    # reset dropout layers to train mode
+                    [module.train() for module in dropout_modules]
+                
+                
+                # enable gradient insertion for regularized run
+                hooks_dict['insert_hook'].enable_insertion()
+                # #++++++++ \catch unregularized gradient ++++++++#
+
+                
 
             optimizer.zero_grad()
             outputs = model(**batch)
@@ -687,10 +733,10 @@ def main():
 
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(
-            args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-        )
+        # unwrapped_model = accelerator.unwrap_model(model)
+        # unwrapped_model.save_pretrained(
+        #     args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+        # )
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
             if args.push_to_hub:
@@ -721,13 +767,7 @@ def main():
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump(all_results, f)
         with open(os.path.join(args.output_dir, "used_arguments.json"), "w") as f:   
-            json.dump({'modded':True,
-                       'num_train_epochs' : args.num_train_epochs,
-                       'hidden_dropout' :args.hidden_dropout
-                       },f)
-    
-
-
+            json.dump(vars(args).update(all_results),f)
 
 if __name__ == "__main__":
     main()
