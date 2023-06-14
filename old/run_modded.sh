@@ -13,7 +13,7 @@ do
 										--num_train_epochs 15  \
 										--output_dir /content/mod_runs/$task_name \
 										--seed 0 \
-										--hidden_dropout 0.3 \
+										--hidden_dropout 0.8 \
 										--with_tracking \
 										--report_to tensorboard
 done
