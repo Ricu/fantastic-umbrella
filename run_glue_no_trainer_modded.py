@@ -477,7 +477,6 @@ def main():
     print(f'Original number of training samples is: {len(train_dataset)}')
     train_dataset = random_split(train_dataset,[args.train_data_frac, 1-args.train_data_frac])[0]
     print(f'Taking a {args.train_data_frac} fraction of train_data results in {len(train_dataset)} training samples')
-    
     eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
 
     # Log a few random samples from the training set:
@@ -767,7 +766,9 @@ def main():
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump(all_results, f)
         with open(os.path.join(args.output_dir, "used_arguments.json"), "w") as f:   
-            json.dump(vars(args).update(all_results),f)
+            argument_dict = vars(args)
+            argument_dict.update(all_results)
+            json.dump(argument_dict,f)
 
 if __name__ == "__main__":
     main()
