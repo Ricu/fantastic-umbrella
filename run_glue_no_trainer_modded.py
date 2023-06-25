@@ -210,6 +210,18 @@ def parse_args():
         action="store_true",
         help="Wether to use gradient insertion or not",
     )
+    parser.add_argument(
+        "--beta1",
+        type=float,
+        default=0.9,
+        help="Change the beta1 value of the AdamW optimizer.",
+    )
+    parser.add_argument(
+        "--beta2",
+        type=float,
+        default=0.999,
+        help="Change the beta2 value of the AdamW optimizer.",
+    )
 
     args = parser.parse_args()
 
@@ -246,7 +258,7 @@ def attach_hooks_to_layer(layer):
     class Insert_Hook():
         def __init__(self, module, insertion_enabled = False, new_grad_output=None):
             self.new_grad_output = new_grad_output
-            # use prepend=True so that this is definetly the first hook being applied
+            # use prepend=True so that this is definitely the first hook being applied
             self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
             self.insertion_enabled = insertion_enabled
 
@@ -765,8 +777,8 @@ def main():
         all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump(all_results, f)
-        with open(os.path.join(args.output_dir, "used_arguments.json"), "w") as f:   
-            argument_dict = vars(args)
+        with open(os.path.join(args.output_dir, "run_overview.json"), "w") as f:   
+            argument_dict = experiment_config
             argument_dict.update(all_results)
             json.dump(argument_dict,f)
 
