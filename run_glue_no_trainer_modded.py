@@ -708,12 +708,14 @@ def main():
             )
 
         eval_metric = metric.compute()
+        eval_loss = outputs.loss
         logger.info(f"epoch {epoch}: {eval_metric}")
 
         if args.with_tracking:
             accelerator.log(
                 {
                     "accuracy" if args.task_name is not None else "glue": eval_metric,
+                    "eval_loss": eval_loss,
                     "train_loss": total_loss.item() / len(train_dataloader),
                     "epoch": epoch,
                     "step": completed_steps,
