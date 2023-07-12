@@ -525,7 +525,7 @@ def main():
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, betas=(args.beta1,args.beta2))
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -714,12 +714,9 @@ def main():
         if args.with_tracking:
             accelerator.log(
                 {
-                    "accuracy" if args.task_name is not None else "glue": eval_metric,
-                    "eval_loss": eval_loss,
-                    "train_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
+                    "eval_loss": eval_loss.item(),
+                    "train_loss": total_loss.item() / len(train_dataloader)
+                } | eval_metric,
                 step=completed_steps,
             )
 
