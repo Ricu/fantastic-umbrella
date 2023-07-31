@@ -191,7 +191,7 @@ def parse_args():
     parser.add_argument(
         "--insert_dropout",
         type=float,
-        default=0.1,
+        default=-1,
         help="Change the dropout rate of the hidden layers during insertion.",
     )
     parser.add_argument(
@@ -221,6 +221,7 @@ def parse_args():
     parser.add_argument(
         "--catch_dropout",
         type=float,
+        default=-1,
         help="Change the dropout rate when catching a gradient. Not giving a value results in using the dropout value from the pretraining.",
     )
 
