@@ -189,21 +189,16 @@ def parse_args():
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
     )
     parser.add_argument(
-        "--hidden_dropout",
+        "--insert_dropout",
         type=float,
         default=0.1,
-        help="Change the dropout rate of the hidden layers.",
+        help="Change the dropout rate of the hidden layers during insertion.",
     )
     parser.add_argument(
         "--train_data_frac",
         type=float,
         default=1,
         help="Change the fraction of training data used.",
-    )
-    parser.add_argument(
-        "--use_pretrain_dropout_in_first_pass",
-        action="store_true",
-        help="Wether to use the dropout rate from pretraining during the regularized run or not",
     )
     parser.add_argument(
         "--use_modded",
@@ -221,6 +216,12 @@ def parse_args():
         type=float,
         default=0.999,
         help="Change the beta2 value of the AdamW optimizer.",
+    )
+
+    parser.add_argument(
+        "--catch_dropout",
+        type=float,
+        help="Change the dropout rate when catching a gradient. Not giving a value results in using the dropout value from the pretraining.",
     )
 
     args = parser.parse_args()
@@ -404,12 +405,25 @@ def main():
 
     # determine dropout_layers which will be activated later (skip input dropout)
     dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
-    pretrain_dropouts = [module.p for module in dropout_modules]
+    
+    # set the dropout values for the catch run
+    if 0 <= args.catch_dropout <= 1:
+        catch_dropouts = [args.catch_dropout for _ in dropout_modules]
+    else:
+        catch_dropouts = [module.p for module in dropout_modules]
+        
 
-    # set the dropout rate
-    print(f'NEW DROPOUT RATE: {args.hidden_dropout}')
-    for module in dropout_modules:
-        module.p = args.hidden_dropout
+    # set the dropout values for the insertion run
+    if  0 <= args.catch_dropout <= 1:
+        insert_dropouts = [args.insert_dropout for _ in dropout_modules]
+    else: 
+        insert_dropouts = [module.p for module in dropout_modules]
+
+    # initialize the dropout to the desired value. If no insertion is done, this dropout values
+    # will be used as the standard dropout value.
+    for module, p in zip(dropout_modules,insert_dropouts):
+        module.p = p
+
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     # Preprocessing the datasets
@@ -631,13 +645,9 @@ def main():
                 # disable gradient insertion for unregularized run
                 hooks_dict['insert_hook'].disable_insertion()
 
-                if args.use_pretrain_dropout_in_first_pass:
-                    # use pretrain dropout during gradient catching
-                    for module, p in zip(dropout_modules,pretrain_dropouts):
-                        module.p = p
-                else:
-                    # set all dropout layers to evalulation mode
-                    [module.eval() for module in dropout_modules]
+                # set the dropout to the desired value during the catch run
+                for module, p in zip(dropout_modules,catch_dropouts):
+                    module.p = p
                 
                 optimizer.zero_grad()
                 outputs = model(**batch)
@@ -647,14 +657,9 @@ def main():
                 # update gradient to be inserted
                 hooks_dict['insert_hook'].update_grad(hooks_dict['catch_hook'].caught_grad)
 
-                
-                if args.use_pretrain_dropout_in_first_pass:
-                    # set new dropout during gradient insertion
-                    for module in dropout_modules:
-                        module.p = args.hidden_dropout
-                else:
-                    # reset dropout layers to train mode
-                    [module.train() for module in dropout_modules]
+                # set the dropout to the desired value during the insertion run
+                for module, p in zip(dropout_modules,insert_dropouts):
+                    module.p = p
                 
                 
                 # enable gradient insertion for regularized run
