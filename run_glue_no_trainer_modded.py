@@ -416,7 +416,7 @@ def main():
         
 
     # set the dropout values for the insertion run
-    if  0 <= args.catch_dropout <= 1:
+    if  0 <= args.insert_dropout <= 1:
         insert_dropouts = [args.insert_dropout for _ in dropout_modules]
     else: 
         insert_dropouts = [module.p for module in dropout_modules]
@@ -643,8 +643,8 @@ def main():
             model.train()
             
             if args.use_modded:
-                # #++++++++ catch unregularized gradient ++++++++#
-                # disable gradient insertion for unregularized run
+                # #++++++++ catch gradient ++++++++#
+                # disable gradient insertion for catch run
                 hooks_dict['insert_hook'].disable_insertion()
 
                 # set the dropout to the desired value during the catch run
@@ -664,9 +664,9 @@ def main():
                     module.p = p
                 
                 
-                # enable gradient insertion for regularized run
+                # re-enable gradient insertion for insertion run
                 hooks_dict['insert_hook'].enable_insertion()
-                # #++++++++ \catch unregularized gradient ++++++++#
+                # #++++++++ \catch gradient ++++++++#
 
                 
 
