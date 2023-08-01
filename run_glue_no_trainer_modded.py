@@ -408,10 +408,11 @@ def main():
     dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
     
     # set the dropout values for the catch run
-    if 0 <= args.catch_dropout <= 1:
-        catch_dropouts = [args.catch_dropout for _ in dropout_modules]
-    else:
-        catch_dropouts = [module.p for module in dropout_modules]
+    if args.use_modded:
+        if 0 <= args.catch_dropout <= 1:
+            catch_dropouts = [args.catch_dropout for _ in dropout_modules]
+        else:
+            catch_dropouts = [module.p for module in dropout_modules]
         
 
     # set the dropout values for the insertion run
@@ -696,9 +697,12 @@ def main():
 
         model.eval()
         samples_seen = 0
+        eval_loss = 0
+
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
                 outputs = model(**batch)
+                eval_loss += outputs.loss.detach().float()
             predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
             predictions, references = accelerator.gather((predictions, batch["labels"]))
             # If we are in a multiprocess environment, the last batch has duplicates
@@ -714,14 +718,15 @@ def main():
             )
 
         eval_metric = metric.compute()
-        eval_loss = outputs.loss
+
         logger.info(f"epoch {epoch}: {eval_metric}")
 
         if args.with_tracking:
             accelerator.log(
                 {
-                    "eval_loss": eval_loss.item(),
-                    "train_loss": total_loss.item() / len(train_dataloader)
+                    "eval_loss": eval_loss.item() / len(eval_dataloader),
+                    "train_loss": total_loss.item() / len(train_dataloader),
+                    "epoch": epoch
                 } | eval_metric,
                 step=completed_steps,
             )
