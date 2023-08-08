@@ -759,7 +759,7 @@ def main():
         #     args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
         # )
         if accelerator.is_main_process:
-            tokenizer.save_pretrained(args.output_dir)
+            # tokenizer.save_pretrained(args.output_dir) 
             if args.push_to_hub:
                 repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
 
