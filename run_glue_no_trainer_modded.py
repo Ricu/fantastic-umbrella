@@ -291,6 +291,24 @@ def attach_hooks_to_layer(layer):
 
     return hooks
 
+class early_stopping_callback:
+  def __init__(self,min_delta=0,patience=5):
+    self.min_delta=min_delta
+    self.patience=patience
+    self.counter=0
+    self.lowest_loss=float('inf')
+  def check_early_stopping(self,eval_loss):
+    delta =  self.lowest_loss - eval_loss
+    if delta >= self.min_delta:
+      self.lowest_loss = eval_loss
+    #   self.lowest_loss_index = -1
+      self.counter = 0
+    else:
+      self.counter += 1
+      if self.counter >= self.patience:
+        return True
+    return False
+  
 def main():
     args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
@@ -425,8 +443,13 @@ def main():
     # will be used as the standard dropout value.
     for module, p in zip(dropout_modules,insert_dropouts):
         module.p = p
-
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
+
+    #++++++++++++++++++ create early stopping callback  ++++++++++++++++++++++++#
+    es_callback = early_stopping_callback()
+
+    #++++++++++++++++++ \create early stopping callback ++++++++++++++++++++++++#
+
 
     # Preprocessing the datasets
     if args.task_name is not None:
@@ -749,6 +772,10 @@ def main():
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
+
+        if es_callback.check_early_stopping(eval_loss.item()):
+          print(f"Stopping early after epoch {epoch}")
+          break
 
     if args.with_tracking:
         accelerator.end_training()
