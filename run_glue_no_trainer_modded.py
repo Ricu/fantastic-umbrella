@@ -46,6 +46,10 @@ from transformers import (
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
 
+from dotenv import load_dotenv
+import os
+load_dotenv("./.env")
+WANDB_API_KEY = os.getenv("WANDB_API_KEY")
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.31.0.dev0")
@@ -223,6 +227,18 @@ def parse_args():
         type=float,
         default=-1,
         help="Change the dropout rate when catching a gradient. Not giving a value results in using the dropout value from the pretraining.",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=10,
+        help="Set the number early stopping patience."
+    )
+    parser.add_argument(
+        "--early_stopping_min_delta",
+        type=float,
+        default=0,
+        help="Set the minimum loss delta for the early stopping."
     )
 
     args = parser.parse_args()
@@ -446,7 +462,8 @@ def main():
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     #++++++++++++++++++ create early stopping callback  ++++++++++++++++++++++++#
-    es_callback = early_stopping_callback()
+    es_callback = early_stopping_callback(min_delta=args.early_stopping_min_delta,
+                                          patience=args.early_stopping_patience)
 
     #++++++++++++++++++ \create early stopping callback ++++++++++++++++++++++++#
 
@@ -773,9 +790,15 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
 
+        best_epoch = epoch-es_callback.counter
         if es_callback.check_early_stopping(eval_loss.item()):
           print(f"Stopping early after epoch {epoch}")
           break
+    
+    best_epoch = {
+        "best_epoch" : epoch-es_callback.counter,
+        "best_eval_loss": es_callback.lowest_loss
+    }
 
     if args.with_tracking:
         accelerator.end_training()
@@ -818,6 +841,7 @@ def main():
         with open(os.path.join(args.output_dir, "run_overview.json"), "w") as f:   
             argument_dict = experiment_config
             argument_dict.update(all_results)
+            argument_dict.update(best_epoch)
             json.dump(argument_dict,f)
 
 if __name__ == "__main__":
