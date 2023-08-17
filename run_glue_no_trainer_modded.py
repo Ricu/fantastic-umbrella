@@ -726,7 +726,8 @@ def main():
                 {
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
                     "train_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch
+                    "epoch": epoch,
+                    "learning_rate" : lr_scheduler.get_last_lr()
                 } | eval_metric,
                 step=completed_steps,
             )
