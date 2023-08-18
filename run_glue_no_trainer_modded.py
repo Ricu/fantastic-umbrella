@@ -621,8 +621,8 @@ def main():
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
         run_name = args.output_dir.split("/")[-1]
-        accelerator.init_trackers("fantastic-umbrella",
-                                  experiment_config,
+        accelerator.init_trackers(project_name="fantastic-umbrella",
+                                  config=experiment_config,
                                   init_kwargs={"wandb": {"entity": "Ricu",
                                                          "name": run_name},
                                                })
