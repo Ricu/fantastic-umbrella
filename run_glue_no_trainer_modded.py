@@ -231,7 +231,7 @@ def parse_args():
     parser.add_argument(
         "--early_stopping_patience",
         type=int,
-        default=10,
+        default=20,
         help="Set the number early stopping patience."
     )
     parser.add_argument(
@@ -620,7 +620,12 @@ def main():
         experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-        accelerator.init_trackers("glue_no_trainer", experiment_config)
+        run_name = args.output_dir.split("/")[-1]
+        accelerator.init_trackers("fantastic-umbrella",
+                                  experiment_config,
+                                  init_kwargs={"wandb": {"entity": "Ricu",
+                                                         "name": run_name},
+                                               })
 
     # Get the metric function
     if args.task_name is not None:
@@ -767,7 +772,7 @@ def main():
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
                     "train_loss": total_loss.item() / len(train_dataloader),
                     "epoch": epoch,
-                    "learning_rate" : lr_scheduler.get_last_lr()
+                    "learning_rate" : lr_scheduler.get_last_lr()[-1]
                 } | eval_metric,
                 step=completed_steps,
             )
