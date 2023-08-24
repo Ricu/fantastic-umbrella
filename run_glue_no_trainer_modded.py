@@ -29,8 +29,10 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset
 from huggingface_hub import Repository, create_repo
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, ConcatDataset
 from tqdm.auto import tqdm
+
+from sklearn.model_selection import train_test_split
 
 import transformers
 from transformers import (
@@ -199,7 +201,7 @@ def parse_args():
         help="Change the dropout rate of the hidden layers during insertion.",
     )
     parser.add_argument(
-        "--train_data_frac",
+        "--training_size",
         type=float,
         default=1,
         help="Change the fraction of training data used.",
@@ -231,7 +233,7 @@ def parse_args():
     parser.add_argument(
         "--early_stopping_patience",
         type=int,
-        default=20,
+        default=10,
         help="Set the number early stopping patience."
     )
     parser.add_argument(
@@ -539,13 +541,45 @@ def main():
             desc="Running tokenizer on dataset",
         )
 
-    train_dataset = processed_datasets["train"]
+    ########### Modify datasets #############
 
-    ########### Change number of training samples #############
-    print(f'Original number of training samples is: {len(train_dataset)}')
-    train_dataset = random_split(train_dataset,[args.train_data_frac, 1-args.train_data_frac])[0]
-    print(f'Taking a {args.train_data_frac} fraction of train_data results in {len(train_dataset)} training samples')
-    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+    if args.training_size != 1.0:
+        pre_train_dataset = processed_datasets["train"]
+        print(f'Original number of training samples is: {len(pre_train_dataset)} with {sum(pre_train_dataset["labels"])/len(pre_train_dataset["labels"])} of the data in class 1')
+
+        pre_eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+        print(f'Original number of validation samples is: {len(pre_eval_dataset)} with {sum(pre_eval_dataset["labels"])/len(pre_eval_dataset["labels"])} of the data in class 1')
+        train_size = int(args.training_size) if args.training_size > 1 else args.training_size
+
+        train_indices, validation_indices, _, _ = train_test_split(
+            range(len(pre_train_dataset)), # dummy indices
+            pre_train_dataset["labels"], #
+            stratify = pre_train_dataset["labels"],
+            train_size = train_size,
+            random_state = args.seed
+        )
+        
+        train_dataset = Subset(pre_train_dataset,train_indices)
+        print(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
+
+
+        eval_dataset = ConcatDataset([pre_eval_dataset,Subset(pre_train_dataset,validation_indices)])
+        print(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
+        
+        if len(train_indices) < args.per_device_train_batch_size:
+            print(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
+            missing_factor = int(args.per_device_train_batch_size/len(train_indices))
+            train_dataset = ConcatDataset([train_dataset]*missing_factor)
+
+            print(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
+    else:
+        train_dataset = processed_datasets["train"]
+        print(f'Number of training samples is: {len(train_dataset)} with {sum(train_dataset["labels"])/len(train_dataset["labels"])} of the data in class 1')
+   
+        eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+        print(f'Number of validation samples is: {len(eval_dataset)} with {sum(eval_dataset["labels"])/len(eval_dataset["labels"])} of the data in class 1')
+    ########### \Modify datasets #############
+
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
@@ -675,7 +709,14 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
+    # allow training to be stopped via variable
+    training_running = True
+
     for epoch in range(starting_epoch, args.num_train_epochs):
+        # if e.g. early stopping stops training, just skip the remaining epochs
+        if not training_running:
+            continue
+
         model.train()
         if args.with_tracking:
             total_loss = 0
@@ -795,10 +836,9 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
 
-        best_epoch = epoch-es_callback.counter
         if es_callback.check_early_stopping(eval_loss.item()):
           print(f"Stopping early after epoch {epoch}")
-          break
+          training_running = False
     
     best_epoch = {
         "best_epoch" : epoch-es_callback.counter,
