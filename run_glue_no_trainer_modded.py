@@ -242,6 +242,12 @@ def parse_args():
         default=0,
         help="Set the minimum loss delta for the early stopping."
     )
+    parser.add_argument(
+        "--original_gradient_fraction",
+        type=float,
+        default=0.0,
+        help="Determines the fraction of the gradient resulting from the forward pass with dropout to be inserted."
+    )
 
     args = parser.parse_args()
 
@@ -261,7 +267,7 @@ def parse_args():
 
     return args
     
-def attach_hooks_to_layer(layer):
+def attach_hooks_to_layer(layer, original_gradient_fraction=0):
     class Catch_Hook():
         def __init__(self, module):
             self.hook = module.register_full_backward_hook(self.hook_fn)
@@ -276,18 +282,24 @@ def attach_hooks_to_layer(layer):
 
 
     class Insert_Hook():
-        def __init__(self, module, insertion_enabled = False, new_grad_output=None):
+        def __init__(self, module, insertion_enabled = False, new_grad_output=None, original_gradient_fraction=0):
             self.new_grad_output = new_grad_output
             # use prepend=True so that this is definitely the first hook being applied
             self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
             self.insertion_enabled = insertion_enabled
+            assert (0 <= original_gradient_fraction <= 1), "Gradient fraction should be between 0 and 1"
+            self.original_gradient_fraction = original_gradient_fraction
 
         def hook_fn(self, module, grad_output):
             if self.insertion_enabled:
             # simply return the previously caught grad_output
             # this will replace the current grad_output (if prehook is used)
             # if non-pre hook is used, grad_input will be replaced (not desire in our case)
-                return self.new_grad_output
+                if self.original_gradient_fraction > 0:
+                    ogf = self.original_gradient_fraction
+                    return ogf * grad_output + (1-ogf) * self.new_grad_output
+                else:
+                    return self.new_grad_output
 
         def update_grad(self, new_grad_output):
             self.new_grad_output = new_grad_output
@@ -438,7 +450,7 @@ def main():
 
     #++++++++++++++++++ attach hooks to the last layer ++++++++++++++++++++++++#
     layer = model.classifier
-    hooks_dict = attach_hooks_to_layer(layer)
+    hooks_dict = attach_hooks_to_layer(layer, args.original_gradient_fraction)
 
     # determine dropout_layers which will be activated later (skip input dropout)
     dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
