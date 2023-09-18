@@ -851,10 +851,10 @@ def main():
         # Early stopping check
         if es_callback.check_early_stopping(eval_loss.item()):
             print(f"Stopping early after epoch {epoch}")
-            accelerator.set_breakpoint()
+            accelerator.set_trigger()
             #   training_running = False
 
-        if accelerator.check_breakpoint():
+        if accelerator.check_trigger():
             break
     
     best_epoch = {
