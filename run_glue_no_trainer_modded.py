@@ -245,7 +245,7 @@ def parse_args():
     parser.add_argument(
         "--original_gradient_fraction",
         type=float,
-        default=0.0,
+        default=0.5,
         help="Determines the fraction of the gradient resulting from the forward pass with dropout to be inserted."
     )
 
@@ -722,12 +722,12 @@ def main():
     progress_bar.update(completed_steps)
 
     # allow training to be stopped via variable
-    training_running = True
+    # training_running = True
 
     for epoch in range(starting_epoch, args.num_train_epochs):
         # if e.g. early stopping stops training, just skip the remaining epochs
-        if not training_running:
-            continue
+        # if not training_running:
+        #     continue
 
         model.train()
         if args.with_tracking:
@@ -848,9 +848,14 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
 
+        # Early stopping check
         if es_callback.check_early_stopping(eval_loss.item()):
-          print(f"Stopping early after epoch {epoch}")
-          training_running = False
+            print(f"Stopping early after epoch {epoch}")
+            accelerator.set_breakpoint()
+            #   training_running = False
+
+        if accelerator.check_breakpoint():
+            break
     
     best_epoch = {
         "best_epoch" : epoch-es_callback.counter,
