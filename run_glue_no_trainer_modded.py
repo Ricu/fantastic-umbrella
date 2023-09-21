@@ -328,6 +328,7 @@ class early_stopping_callback:
     self.counter=0
     self.lowest_loss=float('inf')
   def check_early_stopping(self,eval_loss):
+    print(f"current eval_loss {eval_loss}")
     delta =  self.lowest_loss - eval_loss
     if delta >= self.min_delta:
       self.lowest_loss = eval_loss
@@ -447,6 +448,9 @@ def main():
         config=config,
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
     )
+
+    if args.with_tracking:
+        softmax = torch.nn.Softmax(dim=1)
 
     #++++++++++++++++++ attach hooks to the last layer ++++++++++++++++++++++++#
     layer = model.classifier
@@ -732,6 +736,9 @@ def main():
         model.train()
         if args.with_tracking:
             total_loss = 0
+            avg_train_p_max = 0
+            avg_train_p_var = 0
+
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
@@ -774,6 +781,11 @@ def main():
             # We keep track of the loss at each epoch
             if args.with_tracking:
                 total_loss += loss.detach().float()
+                avg_train_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
+                avg_train_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
+
+
+
             loss = loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
             if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
@@ -795,12 +807,19 @@ def main():
 
         model.eval()
         samples_seen = 0
-        eval_loss = 0
+        
+        if args.with_tracking:
+            eval_loss = 0
+            avg_eval_p_max = 0
+            avg_eval_p_var = 0
 
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
                 outputs = model(**batch)
                 eval_loss += outputs.loss.detach().float()
+                avg_eval_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
+                avg_eval_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
+
             predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
             predictions, references = accelerator.gather((predictions, batch["labels"]))
             # If we are in a multiprocess environment, the last batch has duplicates
@@ -825,7 +844,11 @@ def main():
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
                     "train_loss": total_loss.item() / len(train_dataloader),
                     "epoch": epoch,
-                    "learning_rate" : lr_scheduler.get_last_lr()[-1]
+                    "learning_rate" : lr_scheduler.get_last_lr()[-1],
+                    "avg_train_p_max" : avg_train_p_max / len(train_dataloader),
+                    "avg_eval_p_max" : avg_eval_p_max / len(eval_dataloader),
+                    "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
+                    "avg_eval_p_var" : avg_eval_p_var / len(eval_dataloader)
                 } | eval_metric,
                 step=completed_steps,
             )
