@@ -328,8 +328,8 @@ class early_stopping_callback:
     self.counter=0
     self.lowest_loss=float('inf')
   def check_early_stopping(self,eval_loss):
-    print(f"current eval_loss {eval_loss}")
     delta =  self.lowest_loss - eval_loss
+    print(f"DEVICE {torch.cuda.current_device()}: current eval_loss {eval_loss}, lowest eval_loss {self.lowest_loss}, delta {delta} ")
     if delta >= self.min_delta:
       self.lowest_loss = eval_loss
     #   self.lowest_loss_index = -1
@@ -835,7 +835,8 @@ def main():
             )
 
         eval_metric = metric.compute()
-
+        # print(f'Eval loss gathered:')
+        # print(accelerator.gather_for_metrics(eval_loss))
         logger.info(f"epoch {epoch}: {eval_metric}")
 
         if args.with_tracking:
@@ -872,6 +873,7 @@ def main():
             accelerator.save_state(output_dir)
 
         # Early stopping check
+        # print(f"current eval_loss {eval_loss.item()} on device {eval_loss.device}")
         if es_callback.check_early_stopping(eval_loss.item()):
             print(f"Stopping early after epoch {epoch}")
             accelerator.set_trigger()
