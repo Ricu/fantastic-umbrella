@@ -266,60 +266,49 @@ def parse_args():
         assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
 
     return args
-    
-def attach_hooks_to_layer(layer, original_gradient_fraction=0):
-    class Catch_Hook():
-        def __init__(self, module):
-            self.hook = module.register_full_backward_hook(self.hook_fn)
 
-        def hook_fn(self, module, grad_input, grad_output):
-            self.caught_grad = grad_output
-            # print('caught a gradient:')
-            # print(self.caught_grad)
+class Catch_Hook():
+    def __init__(self, module):
+        self.hook = module.register_full_backward_hook(self.hook_fn)
 
-        def close(self):
-            self.hook.remove()
+    def hook_fn(self, module, grad_input, grad_output):
+        self.caught_grad = grad_output
+        # print('caught a gradient:')
+        # print(self.caught_grad)
 
+    def close(self):
+        self.hook.remove()
 
-    class Insert_Hook():
-        def __init__(self, module, insertion_enabled = False, new_grad_output=None, original_gradient_fraction=0):
-            self.new_grad_output = new_grad_output
-            # use prepend=True so that this is definitely the first hook being applied
-            self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
-            self.insertion_enabled = insertion_enabled
-            assert (0 <= original_gradient_fraction <= 1), "Gradient fraction should be between 0 and 1"
-            self.original_gradient_fraction = original_gradient_fraction
+class Insert_Hook():
+    def __init__(self, module, insertion_enabled = False, new_grad_output=None, original_gradient_fraction=0):
+        self.new_grad_output = new_grad_output
+        # use prepend=True so that this is definitely the first hook being applied
+        self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
+        self.insertion_enabled = insertion_enabled
+        assert (0 <= original_gradient_fraction <= 1), "Gradient fraction should be between 0 and 1"
+        self.original_gradient_fraction = original_gradient_fraction
 
-        def hook_fn(self, module, grad_output):
-            if self.insertion_enabled:
-            # simply return the previously caught grad_output
-            # this will replace the current grad_output (if prehook is used)
-            # if non-pre hook is used, grad_input will be replaced (not desire in our case)
-                if self.original_gradient_fraction > 0:
-                    ogf = self.original_gradient_fraction
-                    return ogf * grad_output + (1-ogf) * self.new_grad_output
-                else:
-                    return self.new_grad_output
+    def hook_fn(self, module, grad_output):
+        if self.insertion_enabled:
+        # simply return the previously caught grad_output
+        # this will replace the current grad_output (if prehook is used)
+            if self.original_gradient_fraction > 0:
+                ogf = self.original_gradient_fraction
+                return ogf * grad_output + (1-ogf) * self.new_grad_output
+            else:
+                return self.new_grad_output
 
-        def update_grad(self, new_grad_output):
-            self.new_grad_output = new_grad_output
+    def update_grad(self, new_grad_output):
+        self.new_grad_output = new_grad_output
 
-        def close(self):
-            self.hook.remove()
+    def close(self):
+        self.hook.remove()
 
-        def enable_insertion(self):
-            self.insertion_enabled = True
+    def enable_insertion(self):
+        self.insertion_enabled = True
 
-        def disable_insertion(self):
-            self.insertion_enabled = False
-
-    #++++++++++++++++++ attach hooks to the specified layer ++++++++++++++++++++++++#
-    hooks = {}
-    hooks['catch_hook'] = Catch_Hook(layer)
-    hooks['insert_hook'] = Insert_Hook(layer)
-    #++++++++++++++++++ \attach hooks to the specified layer ++++++++++++++++++++++++#
-
-    return hooks
+    def disable_insertion(self):
+        self.insertion_enabled = False
 
 class early_stopping_callback:
   def __init__(self,min_delta=0,patience=5):
@@ -454,7 +443,10 @@ def main():
 
     #++++++++++++++++++ attach hooks to the last layer ++++++++++++++++++++++++#
     layer = model.classifier
-    hooks_dict = attach_hooks_to_layer(layer, args.original_gradient_fraction)
+    hooks = {
+        'catch_hook' : Catch_Hook(layer),
+        'insert_hook' : Insert_Hook(layer,original_gradient_fraction)
+    }
 
     # determine dropout_layers which will be activated later (skip input dropout)
     dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
