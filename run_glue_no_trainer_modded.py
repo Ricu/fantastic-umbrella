@@ -273,8 +273,6 @@ class Catch_Hook():
 
     def hook_fn(self, module, grad_input, grad_output):
         self.caught_grad = grad_output
-        # print('caught a gradient:')
-        # print(self.caught_grad)
 
     def close(self):
         self.hook.remove()
@@ -318,7 +316,7 @@ class early_stopping_callback:
     self.lowest_loss=float('inf')
   def check_early_stopping(self,eval_loss):
     delta =  self.lowest_loss - eval_loss
-    print(f"DEVICE {torch.cuda.current_device()}: current eval_loss {eval_loss}, lowest eval_loss {self.lowest_loss}, delta {delta} ")
+    # print(f"DEVICE {torch.cuda.current_device()}: current eval_loss {eval_loss}, lowest eval_loss {self.lowest_loss}, delta {delta} ")
     if delta >= self.min_delta:
       self.lowest_loss = eval_loss
     #   self.lowest_loss_index = -1
@@ -609,7 +607,6 @@ def main():
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
-    print(f'DEVICE {torch.cuda.current_device()}: TRAIN DATASET LENGTH: {len(train_dataloader.dataset)}')
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     # Optimizer
@@ -741,8 +738,6 @@ def main():
 
         for step, batch in enumerate(active_dataloader):
             model.train()
-            print(f'\n\n\n\n-------------------\n DEVICE {torch.cuda.current_device()}: batch_size: {len(batch)}')
-            print(f'DEVICE {torch.cuda.current_device()}: Dataloader size: {len(active_dataloader)}')
             if args.use_modded:
                 # #++++++++ catch gradient ++++++++#
                 # disable gradient insertion for catch run
@@ -831,13 +826,8 @@ def main():
                 references=references,
             )
         
-        # losses = 
-        # print(f'DEVICE {torch.cuda.current_device()}: MEAN OF EVAL_LOSSES: {torch.mean(accelerator.gather_for_metrics(eval_loss)).item()}')
-        # print(f'DEVICE {torch.cuda.current_device()}: GATHERED FOR METRIC EVAL_LOSSES: {accelerator.gather_for_metrics(torch.mean(eval_loss).item())}')
-
         eval_metric = metric.compute()
-        # print(f'Eval loss gathered:')
-        
+
         logger.info(f"epoch {epoch}: {eval_metric}")
 
         if args.with_tracking:
@@ -873,11 +863,9 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
 
-        # Early stopping check
-        # print(f"current eval_loss {eval_loss.item()} on device {eval_loss.device}")
         global_eval_loss = torch.mean(accelerator.gather_for_metrics(eval_loss)).item()
         if es_callback.check_early_stopping(global_eval_loss):
-            print(f"Stopping early after epoch {epoch}")
+            logger.info(f"Stopping early after epoch {epoch}")
             accelerator.set_trigger()
             #   training_running = False
 
