@@ -445,7 +445,7 @@ def main():
     layer = model.classifier
     hooks = {
         'catch_hook' : Catch_Hook(layer),
-        'insert_hook' : Insert_Hook(layer,original_gradient_fraction)
+        'insert_hook' : Insert_Hook(layer,args.original_gradient_fraction)
     }
 
     # determine dropout_layers which will be activated later (skip input dropout)
@@ -553,10 +553,10 @@ def main():
 
     if args.training_size != 1.0:
         pre_train_dataset = processed_datasets["train"]
-        print(f'Original number of training samples is: {len(pre_train_dataset)} with {sum(pre_train_dataset["labels"])/len(pre_train_dataset["labels"])} of the data in class 1')
+        logger.info(f'Original number of training samples is: {len(pre_train_dataset)} with {sum(pre_train_dataset["labels"])/len(pre_train_dataset["labels"])} of the data in class 1')
 
         pre_eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-        print(f'Original number of validation samples is: {len(pre_eval_dataset)} with {sum(pre_eval_dataset["labels"])/len(pre_eval_dataset["labels"])} of the data in class 1')
+        logger.info(f'Original number of validation samples is: {len(pre_eval_dataset)} with {sum(pre_eval_dataset["labels"])/len(pre_eval_dataset["labels"])} of the data in class 1')
         train_size = int(args.training_size) if args.training_size > 1 else args.training_size
 
         train_indices, validation_indices, _, _ = train_test_split(
@@ -568,30 +568,32 @@ def main():
         )
         
         train_dataset = Subset(pre_train_dataset,train_indices)
-        print(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
+        logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
 
 
         eval_dataset = ConcatDataset([pre_eval_dataset,Subset(pre_train_dataset,validation_indices)])
-        print(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
+        logger.info(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
         
-        if len(train_indices) < args.per_device_train_batch_size:
-            print(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
-            missing_factor = int(args.per_device_train_batch_size/len(train_indices))
+        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+
+        if len(train_indices) < total_batch_size:
+            logger.info(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
+            missing_factor = int(total_batch_size/len(train_indices))
             train_dataset = ConcatDataset([train_dataset]*missing_factor)
 
-            print(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
+            logger.info(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
     else:
         train_dataset = processed_datasets["train"]
-        print(f'Number of training samples is: {len(train_dataset)} with {sum(train_dataset["labels"])/len(train_dataset["labels"])} of the data in class 1')
+        logger.info(f'Number of training samples is: {len(train_dataset)} with {sum(train_dataset["labels"])/len(train_dataset["labels"])} of the data in class 1')
    
         eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-        print(f'Number of validation samples is: {len(eval_dataset)} with {sum(eval_dataset["labels"])/len(eval_dataset["labels"])} of the data in class 1')
+        logger.info(f'Number of validation samples is: {len(eval_dataset)} with {sum(eval_dataset["labels"])/len(eval_dataset["labels"])} of the data in class 1')
     ########### \Modify datasets #############
 
 
     # Log a few random samples from the training set:
-    for index in random.sample(range(len(train_dataset)), 3):
-        logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
+    # for index in random.sample(range(len(train_dataset)), 3):
+    #     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
     # DataLoaders creation:
     if args.pad_to_max_length:
@@ -607,7 +609,7 @@ def main():
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
-    print(len(train_dataloader))
+    print(f'DEVICE {torch.cuda.current_device()}: TRAIN DATASET LENGTH: {len(train_dataloader.dataset)}')
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     # Optimizer
@@ -736,13 +738,15 @@ def main():
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
+
         for step, batch in enumerate(active_dataloader):
             model.train()
-            
+            print(f'\n\n\n\n-------------------\n DEVICE {torch.cuda.current_device()}: batch_size: {len(batch)}')
+            print(f'DEVICE {torch.cuda.current_device()}: Dataloader size: {len(active_dataloader)}')
             if args.use_modded:
                 # #++++++++ catch gradient ++++++++#
                 # disable gradient insertion for catch run
-                hooks_dict['insert_hook'].disable_insertion()
+                hooks['insert_hook'].disable_insertion()
 
                 # set the dropout to the desired value during the catch run
                 for module, p in zip(dropout_modules,catch_dropouts):
@@ -754,7 +758,7 @@ def main():
                 accelerator.backward(loss)
 
                 # update gradient to be inserted
-                hooks_dict['insert_hook'].update_grad(hooks_dict['catch_hook'].caught_grad)
+                hooks['insert_hook'].update_grad(hooks['catch_hook'].caught_grad)
 
                 # set the dropout to the desired value during the insertion run
                 for module, p in zip(dropout_modules,insert_dropouts):
@@ -762,7 +766,7 @@ def main():
                 
                 
                 # re-enable gradient insertion for insertion run
-                hooks_dict['insert_hook'].enable_insertion()
+                hooks['insert_hook'].enable_insertion()
                 # #++++++++ \catch gradient ++++++++#
 
                 
@@ -785,7 +789,7 @@ def main():
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 progress_bar.update(1)
-                completed_steps += 1
+                completed_steps += 1         
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
@@ -796,6 +800,7 @@ def main():
 
             if completed_steps >= args.max_train_steps:
                 break
+
 
         model.eval()
         samples_seen = 0
@@ -825,10 +830,14 @@ def main():
                 predictions=predictions,
                 references=references,
             )
+        
+        # losses = 
+        # print(f'DEVICE {torch.cuda.current_device()}: MEAN OF EVAL_LOSSES: {torch.mean(accelerator.gather_for_metrics(eval_loss)).item()}')
+        # print(f'DEVICE {torch.cuda.current_device()}: GATHERED FOR METRIC EVAL_LOSSES: {accelerator.gather_for_metrics(torch.mean(eval_loss).item())}')
 
         eval_metric = metric.compute()
         # print(f'Eval loss gathered:')
-        # print(accelerator.gather_for_metrics(eval_loss))
+        
         logger.info(f"epoch {epoch}: {eval_metric}")
 
         if args.with_tracking:
@@ -866,7 +875,8 @@ def main():
 
         # Early stopping check
         # print(f"current eval_loss {eval_loss.item()} on device {eval_loss.device}")
-        if es_callback.check_early_stopping(eval_loss.item()):
+        global_eval_loss = torch.mean(accelerator.gather_for_metrics(eval_loss)).item()
+        if es_callback.check_early_stopping(global_eval_loss):
             print(f"Stopping early after epoch {epoch}")
             accelerator.set_trigger()
             #   training_running = False
