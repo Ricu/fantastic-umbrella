@@ -40,7 +40,8 @@
             "type": "python",
             "request": "launch",
             "module": "accelerate.commands.launch",
-            "console": "externalTerminal",
+            // "console": "externalTerminal",
+            "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
                 "run_glue_no_trainer_modded.py",
