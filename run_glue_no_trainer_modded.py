@@ -309,22 +309,37 @@ class Insert_Hook():
         self.insertion_enabled = False
 
 class early_stopping_callback:
-  def __init__(self,min_delta=0,patience=5):
+  def __init__(self,metric_name,direction='min',min_delta=0,patience=5):
+    '''
+    `direction` is either 'min' or 'max' 
+    '''
+    self.metric_name=metric_name
+    if direction not in ['max','min']:
+        raise ValueError(
+            f'Invalid direction: {direction}. Should be one of: max, min'
+        )
+    self.direction = direction
+    self.sign = 1 if direction == 'min' else -1
     self.min_delta=min_delta
     self.patience=patience
-    self.counter=0
-    self.lowest_loss=float('inf')
-  def check_early_stopping(self,eval_loss):
-    delta =  self.lowest_loss - eval_loss
-    # print(f"DEVICE {torch.cuda.current_device()}: current eval_loss {eval_loss}, lowest eval_loss {self.lowest_loss}, delta {delta} ")
+    self.wait_steps=0
+    self.improved_metric= False
+    self.best_value=self.sign * float('inf')
+    self.best_epoch=0
+
+  def check_early_stopping(self,value,epoch):
+    delta = self.sign * (self.best_value - value)
+
     if delta >= self.min_delta:
-      self.lowest_loss = eval_loss
-    #   self.lowest_loss_index = -1
-      self.counter = 0
+        self.best_value = value
+        self.best_epoch = epoch
+        self.wait_steps = 0
+        self.improved_metric = True
     else:
-      self.counter += 1
-      if self.counter >= self.patience:
-        return True
+        self.wait_steps += 1
+        self.improved_metric = False
+        if self.wait_steps >= self.patience:
+            return True
     return False
   
 def main():
@@ -472,9 +487,23 @@ def main():
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     #++++++++++++++++++ create early stopping callback  ++++++++++++++++++++++++#
-    es_callback = early_stopping_callback(min_delta=args.early_stopping_min_delta,
-                                          patience=args.early_stopping_patience)
+    # Eval loss
+    early_stoppings = [early_stopping_callback(
+        metric_name='eval_loss',
+        direction='min',
+        min_delta=args.early_stopping_min_delta,
+        patience=args.early_stopping_patience
+    )]
 
+    metric.add(prediction=0,reference=0)
+    metric_names = list(metric.compute().keys())
+    for metric_name in metric_names:
+        early_stoppings.append(early_stopping_callback(
+            metric_name=metric_name,
+            direction='max',
+            min_delta=args.early_stopping_min_delta,
+            patience=args.early_stopping_patience
+    ))
     #++++++++++++++++++ \create early stopping callback ++++++++++++++++++++++++#
 
 
@@ -828,8 +857,7 @@ def main():
                 references=references,
             )
         
-        eval_metric = metric.compute()
-        print(f'DEVICE {torch.cuda.current_device}: computed eval_metric: {eval_metric}')
+        eval_metrics = metric.compute()
         logger.info(f"epoch {epoch}: {eval_metric}")
 
         if args.with_tracking:
@@ -843,7 +871,7 @@ def main():
                     "avg_eval_p_max" : avg_eval_p_max / len(eval_dataloader),
                     "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
                     "avg_eval_p_var" : avg_eval_p_var / len(eval_dataloader)
-                } | eval_metric,
+                } | eval_metrics,
                 step=completed_steps,
             )
 
@@ -865,19 +893,26 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
 
-        global_eval_loss = torch.mean(accelerator.gather_for_metrics(eval_loss)).item()
-        if es_callback.check_early_stopping(global_eval_loss):
-            logger.info(f"Stopping early after epoch {epoch}")
-            accelerator.set_trigger()
+        ### Early stoppings
+        eval_metrics['eval_loss'] = torch.mean(accelerator.gather_for_metrics(eval_loss)).item()
+        metrics_ready_to_stop = [es.check_early_stopping(eval_metrics[es.metric_name],epoch) for es in early_stoppings]
 
+        if all(metrics_ready_to_stop):
+            accelerator.set_trigger()
+            logger.info(f"Stopping early after epoch {epoch}.")
+            for es in early_stoppings:
+                logger.info(
+                    'Best value ({}) for metric {} at the end of epoch {}'.format(
+                        es.best_value,
+                        es.metric_name,
+                        es.best_epoch
+                    )
+                )
+
+        ### Stop model if neccessary
         if accelerator.check_trigger():
             break
-    
-    best_epoch = {
-        "best_epoch" : epoch-es_callback.counter,
-        "best_eval_loss": es_callback.lowest_loss
-    }
-
+        
     if args.with_tracking:
         accelerator.end_training()
 
