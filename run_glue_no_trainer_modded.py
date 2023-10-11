@@ -206,11 +206,11 @@ def parse_args():
         default=1,
         help="Change the fraction of training data used.",
     )
-    parser.add_argument(
-        "--use_modded",
-        action="store_true",
-        help="Wether to use gradient insertion or not",
-    )
+    # parser.add_argument(
+    #     "--use_modded",
+    #     action="store_true",
+    #     help="Wether to use gradient insertion or not",
+    # )
     parser.add_argument(
         "--beta1",
         type=float,
@@ -227,7 +227,7 @@ def parse_args():
     parser.add_argument(
         "--catch_dropout",
         type=float,
-        default=-1,
+        default=None,
         help="Change the dropout rate when catching a gradient. Not giving a value results in using the dropout value from the pretraining.",
     )
     parser.add_argument(
@@ -449,8 +449,10 @@ def main():
     # determine dropout_layers which will be activated later (skip input dropout)
     dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
     
+    use_modded = not (args.catch_dropout is None)
+    
     # set the dropout values for the catch run
-    if args.use_modded:
+    if use_modded:
         if 0 <= args.catch_dropout <= 1:
             catch_dropouts = [args.catch_dropout for _ in dropout_modules]
         else:
@@ -738,7 +740,7 @@ def main():
 
         for step, batch in enumerate(active_dataloader):
             model.train()
-            if args.use_modded:
+            if use_modded:
                 # #++++++++ catch gradient ++++++++#
                 # disable gradient insertion for catch run
                 hooks['insert_hook'].disable_insertion()
@@ -827,7 +829,7 @@ def main():
             )
         
         eval_metric = metric.compute()
-
+        print(f'DEVICE {torch.cuda.current_device}: computed eval_metric: {eval_metric}')
         logger.info(f"epoch {epoch}: {eval_metric}")
 
         if args.with_tracking:
@@ -867,7 +869,6 @@ def main():
         if es_callback.check_early_stopping(global_eval_loss):
             logger.info(f"Stopping early after epoch {epoch}")
             accelerator.set_trigger()
-            #   training_running = False
 
         if accelerator.check_trigger():
             break
