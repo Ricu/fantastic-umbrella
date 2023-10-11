@@ -206,11 +206,6 @@ def parse_args():
         default=1,
         help="Change the fraction of training data used.",
     )
-    # parser.add_argument(
-    #     "--use_modded",
-    #     action="store_true",
-    #     help="Wether to use gradient insertion or not",
-    # )
     parser.add_argument(
         "--beta1",
         type=float,
@@ -692,7 +687,7 @@ def main():
         experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-        run_name = args.output_dir.split("/")[-1]
+        run_name = "/".join(args.output_dir.split("/")[-2:])
         accelerator.init_trackers(project_name="fantastic-umbrella",
                                   config=experiment_config,
                                   init_kwargs={"wandb": {"entity": "Ricu",
@@ -954,7 +949,6 @@ def main():
         with open(os.path.join(args.output_dir, "run_overview.json"), "w") as f:   
             argument_dict = experiment_config
             argument_dict.update(all_results)
-            argument_dict.update(best_epoch)
             json.dump(argument_dict,f)
 
 if __name__ == "__main__":
