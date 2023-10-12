@@ -50,6 +50,7 @@ from transformers.utils.versions import require_version
 
 from dotenv import load_dotenv
 import os
+import wandb
 load_dotenv("./.env")
 WANDB_API_KEY = os.getenv("WANDB_API_KEY")
 
@@ -324,13 +325,13 @@ class early_stopping_callback:
 
   def check_early_stopping(self,value,epoch):
     delta = self.sign * (self.best_value - value)
-
-    if delta >= self.min_delta:
+    if delta >= self.min_delta: # improved metric
         self.best_value = value
         self.best_epoch = epoch
         self.wait_steps = 0
         self.improved_metric = True
-    else:
+        wandb.run.summary[f"best_{self.metric_name}"] = value
+    else: # not improved metric
         self.wait_steps += 1
         self.improved_metric = False
         if self.wait_steps >= self.patience:
@@ -480,6 +481,12 @@ def main():
     for module, p in zip(dropout_modules,insert_dropouts):
         module.p = p
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
+
+    # Get the metric function
+    if args.task_name is not None:
+        metric = evaluate.load("glue", args.task_name)
+    else:
+        metric = evaluate.load("accuracy")
 
     #++++++++++++++++++ create early stopping callback  ++++++++++++++++++++++++#
     # Eval loss
@@ -694,11 +701,6 @@ def main():
                                                          "name": run_name},
                                                })
 
-    # Get the metric function
-    if args.task_name is not None:
-        metric = evaluate.load("glue", args.task_name)
-    else:
-        metric = evaluate.load("accuracy")
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -853,9 +855,11 @@ def main():
             )
         
         eval_metrics = metric.compute()
-        logger.info(f"epoch {epoch}: {eval_metric}")
+        logger.info(f"epoch {epoch}: {eval_metrics}")
 
         if args.with_tracking:
+            logger.info(f'DEVICE {torch.cuda.current_device}: BEFORE LOGGING TO WANDB - TRAIN LOSS: {total_loss.item() / len(train_dataloader)}')
+            logger.info(f'DEVICE {torch.cuda.current_device}: BEFORE LOGGING TO WANDB - EVAL LOSS: {eval_loss.item() / len(eval_dataloader)}')
             accelerator.log(
                 {
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
@@ -889,7 +893,7 @@ def main():
             accelerator.save_state(output_dir)
 
         ### Early stoppings
-        eval_metrics['eval_loss'] = torch.mean(accelerator.gather_for_metrics(eval_loss)).item()
+        eval_metrics['eval_loss'] = torch.mean(accelerator.gather_for_metrics(eval_loss)).item() / len(eval_dataloader)
         metrics_ready_to_stop = [es.check_early_stopping(eval_metrics[es.metric_name],epoch) for es in early_stoppings]
 
         if all(metrics_ready_to_stop):
@@ -943,12 +947,10 @@ def main():
         logger.info(f"mnli-mm: {eval_metric}")
 
     if args.output_dir is not None:
-        all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
-        with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-            json.dump(all_results, f)
+        summaries = {f'best_{es.metric_name}' : es.best_value for es in early_stoppings}
         with open(os.path.join(args.output_dir, "run_overview.json"), "w") as f:   
             argument_dict = experiment_config
-            argument_dict.update(all_results)
+            argument_dict.update(summaries)
             json.dump(argument_dict,f)
 
 if __name__ == "__main__":
