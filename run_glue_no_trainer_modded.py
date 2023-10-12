@@ -480,6 +480,11 @@ def main():
     # will be used as the standard dropout value.
     for module, p in zip(dropout_modules,insert_dropouts):
         module.p = p
+
+    modules_require_grad = {
+        named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
+    }
+        
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     # Get the metric function
@@ -775,6 +780,12 @@ def main():
                 for module, p in zip(dropout_modules,catch_dropouts):
                     module.p = p
                 
+                # freeze all layers except for the last
+                for named_param in model.named_parameters():
+                    if 'classifier' not in named_param[0]:
+                        named_param[1].requires_grad = False
+                
+
                 optimizer.zero_grad()
                 outputs = model(**batch)
                 loss = outputs.loss
@@ -787,7 +798,10 @@ def main():
                 for module, p in zip(dropout_modules,insert_dropouts):
                     module.p = p
                 
-                
+                # unfreeze all layers as they have been before
+                for named_param in model.named_parameters():
+                    named_param[1].requires_grad = modules_require_grad[named_param[0]]
+
                 # re-enable gradient insertion for insertion run
                 hooks['insert_hook'].enable_insertion()
                 # #++++++++ \catch gradient ++++++++#
