@@ -593,22 +593,40 @@ def main():
 
         pre_eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
         logger.info(f'Original number of validation samples is: {len(pre_eval_dataset)} with {sum(pre_eval_dataset["labels"])/len(pre_eval_dataset["labels"])} of the data in class 1')
-        train_size = int(args.training_size) if args.training_size > 1 else args.training_size
-
+        
+        target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
         train_indices, validation_indices, _, _ = train_test_split(
             range(len(pre_train_dataset)), # dummy indices
             pre_train_dataset["labels"], #
             stratify = pre_train_dataset["labels"],
-            train_size = train_size,
+            train_size = target_train_size,
             random_state = args.seed
         )
-        
+
+        # if training sizes are really small compared to the total number of samples (e.g. only 32 samples or 0.01 fraction),
+        # there would be relatively many validation samples being added. This could lead to one huge evaluation loop for
+        # an update only consisting 32 samples. This would incur a dramatic increase in evaluation and therefore training time,
+        # even though the benefits of having more validation samples is relatively limited. Therefore, cap the number of
+        # validation samples to be 4 times the original number of validation samples. Simply drop the rest.
+        maximum_number_validation_samples = 4 * len(pre_eval_dataset)
+        if len(validation_indices) > maximum_number_validation_samples:
+            # create another stratified subset of the validation indices
+            reduced_validation_indices, _, _, _ = train_test_split(
+                validation_indices, # take subset of previous validation indices
+                [pre_train_dataset["labels"][index] for index in validation_indices], #
+                stratify = [pre_train_dataset["labels"][index] for index in validation_indices],
+                train_size = maximum_number_validation_samples,
+                random_state = args.seed
+            )
+        else:
+            reduced_validation_indices = validation_indices
+
         train_dataset = Subset(pre_train_dataset,train_indices)
         logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
 
 
-        eval_dataset = ConcatDataset([pre_eval_dataset,Subset(pre_train_dataset,validation_indices)])
-        logger.info(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
+        eval_dataset = ConcatDataset([pre_eval_dataset,Subset(pre_train_dataset,reduced_validation_indices)])
+        logger.info(f'Adding {len(reduced_validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
         
         total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
