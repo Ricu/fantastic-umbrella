@@ -322,15 +322,16 @@ class early_stopping_callback:
     self.improved_metric= False
     self.best_value=self.sign * float('inf')
     self.best_epoch=0
+    self.best_step=0
 
-  def check_early_stopping(self,value,epoch):
+  def check_early_stopping(self,value,epoch,step):
     delta = self.sign * (self.best_value - value)
     if delta >= self.min_delta: # improved metric
         self.best_value = value
         self.best_epoch = epoch
+        self.best_step = step
         self.wait_steps = 0
-        self.improved_metric = True
-        wandb.run.summary[f"best_{self.metric_name}"] = value
+        self.improved_metric = True        
     else: # not improved metric
         self.wait_steps += 1
         self.improved_metric = False
@@ -447,8 +448,7 @@ def main():
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
     )
 
-    if args.with_tracking:
-        softmax = torch.nn.Softmax(dim=1)
+    softmax = torch.nn.Softmax(dim=1)
 
     #++++++++++++++++++ attach hooks to the last layer ++++++++++++++++++++++++#
     layer = model.classifier
@@ -695,8 +695,8 @@ def main():
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
+    experiment_config = vars(args)
     if args.with_tracking:
-        experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
         run_name = "/".join(args.output_dir.split("/")[-2:])
@@ -753,15 +753,10 @@ def main():
     # training_running = True
 
     for epoch in range(starting_epoch, args.num_train_epochs):
-        # if e.g. early stopping stops training, just skip the remaining epochs
-        # if not training_running:
-        #     continue
-
         model.train()
-        if args.with_tracking:
-            total_loss = 0
-            avg_train_p_max = 0
-            avg_train_p_var = 0
+        total_loss = 0
+        avg_train_p_max = 0
+        avg_train_p_var = 0
 
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
@@ -812,10 +807,9 @@ def main():
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
-            if args.with_tracking:
-                total_loss += loss.detach().float()
-                avg_train_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
-                avg_train_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
+            total_loss += loss.detach().float()
+            avg_train_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
+            avg_train_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
 
 
 
@@ -841,11 +835,9 @@ def main():
 
         model.eval()
         samples_seen = 0
-        
-        if args.with_tracking:
-            eval_loss = 0
-            avg_eval_p_max = 0
-            avg_eval_p_var = 0
+        eval_loss = 0
+        avg_eval_p_max = 0
+        avg_eval_p_var = 0
 
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
@@ -908,19 +900,24 @@ def main():
 
         ### Early stoppings
         eval_metrics['eval_loss'] = torch.mean(accelerator.gather_for_metrics(eval_loss)).item() / len(eval_dataloader)
-        metrics_ready_to_stop = [es.check_early_stopping(eval_metrics[es.metric_name],epoch) for es in early_stoppings]
+        metrics_ready_to_stop = [es.check_early_stopping(eval_metrics[es.metric_name],epoch,completed_steps) for es in early_stoppings]
 
         if all(metrics_ready_to_stop):
             accelerator.set_trigger()
             logger.info(f"Stopping early after epoch {epoch}.")
             for es in early_stoppings:
                 logger.info(
-                    'Best value ({}) for metric {} at the end of epoch {}'.format(
+                    'Achieved best value ({}) for metric {} at the end of epoch {}'.format(
                         es.best_value,
                         es.metric_name,
                         es.best_epoch
                     )
                 )
+        # update best values
+        if args.with_tracking:
+            for es in early_stoppings:
+                if es.improved_metric:
+                    wandb.run.summary[f"best_{es.metric_name}"] = es.best_value
 
         ### Stop model if neccessary
         if accelerator.check_trigger():
