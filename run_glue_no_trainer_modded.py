@@ -481,10 +481,6 @@ def main():
     for module, p in zip(dropout_modules,insert_dropouts):
         module.p = p
 
-    modules_require_grad = {
-        named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
-    }
-        
     #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
 
     # Get the metric function
@@ -586,7 +582,6 @@ def main():
         )
 
     ########### Modify datasets #############
-
     if args.training_size != 1.0:
         pre_train_dataset = processed_datasets["train"]
         logger.info(f'Original number of training samples is: {len(pre_train_dataset)} with {sum(pre_train_dataset["labels"])/len(pre_train_dataset["labels"])} of the data in class 1')
@@ -699,6 +694,10 @@ def main():
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
 
+    modules_require_grad = {
+        named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
+    }
+
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -785,42 +784,43 @@ def main():
         for step, batch in enumerate(active_dataloader):
             model.train()
             if use_modded:
-                # #++++++++ catch gradient ++++++++#
-                # disable gradient insertion for catch run
-                hooks['insert_hook'].disable_insertion()
+                # Stop syncing the gradients when freezing parts of the model.
+                with accelerator.no_sync(model):
+                    # #++++++++ catch gradient ++++++++#
+                    # disable gradient insertion for catch run
+                    hooks['insert_hook'].disable_insertion()
 
-                # set the dropout to the desired value during the catch run
-                for module, p in zip(dropout_modules,catch_dropouts):
-                    module.p = p
+                    # set the dropout to the desired value during the catch run
+                    for module, p in zip(dropout_modules,catch_dropouts):
+                        module.p = p
+                    
+                    # freeze all layers except for the last
+                    for named_param in model.named_parameters():
+                        if 'classifier' not in named_param[0]:
+                            named_param[1].requires_grad = False
+                    
+
+                    optimizer.zero_grad()
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    accelerator.backward(loss)
+
+                    # update gradient to be inserted
+                    hooks['insert_hook'].update_grad(hooks['catch_hook'].caught_grad)
+
+                    # set the dropout to the desired value during the insertion run
+                    for module, p in zip(dropout_modules,insert_dropouts):
+                        module.p = p
+                    
+                    # unfreeze all layers as they have been before
+                    for named_param in model.named_parameters():
+                        named_param[1].requires_grad = modules_require_grad[named_param[0]]
+
+                    # re-enable gradient insertion for insertion run
+                    hooks['insert_hook'].enable_insertion()
+                    # #++++++++ \catch gradient ++++++++#
+
                 
-                # freeze all layers except for the last
-                for named_param in model.named_parameters():
-                    if 'classifier' not in named_param[0]:
-                        named_param[1].requires_grad = False
-                
-
-                optimizer.zero_grad()
-                outputs = model(**batch)
-                loss = outputs.loss
-                accelerator.backward(loss)
-
-                # update gradient to be inserted
-                hooks['insert_hook'].update_grad(hooks['catch_hook'].caught_grad)
-
-                # set the dropout to the desired value during the insertion run
-                for module, p in zip(dropout_modules,insert_dropouts):
-                    module.p = p
-                
-                # unfreeze all layers as they have been before
-                for named_param in model.named_parameters():
-                    named_param[1].requires_grad = modules_require_grad[named_param[0]]
-
-                # re-enable gradient insertion for insertion run
-                hooks['insert_hook'].enable_insertion()
-                # #++++++++ \catch gradient ++++++++#
-
-                
-
             optimizer.zero_grad()
             outputs = model(**batch)
             loss = outputs.loss
@@ -829,7 +829,7 @@ def main():
             avg_train_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
             avg_train_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
 
-
+            # print(f'DEVICE {torch.cuda.current_device()}: cls: {list(layer.parameters())}')
 
             loss = loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
@@ -882,8 +882,6 @@ def main():
         logger.info(f"epoch {epoch}: {eval_metrics}")
 
         if args.with_tracking:
-            logger.info(f'DEVICE {torch.cuda.current_device}: BEFORE LOGGING TO WANDB - TRAIN LOSS: {total_loss.item() / len(train_dataloader)}')
-            logger.info(f'DEVICE {torch.cuda.current_device}: BEFORE LOGGING TO WANDB - EVAL LOSS: {eval_loss.item() / len(eval_dataloader)}')
             accelerator.log(
                 {
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
@@ -934,8 +932,10 @@ def main():
         # update best values
         if args.with_tracking:
             for es in early_stoppings:
-                if es.improved_metric:
+                if es.improved_metric and accelerator.is_main_process:
                     wandb.run.summary[f"best_{es.metric_name}"] = es.best_value
+                    wandb.run.summary[f"best_{es.metric_name}_step"] = es.best_step
+                    wandb.run.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
 
         ### Stop model if neccessary
         if accelerator.check_trigger():
