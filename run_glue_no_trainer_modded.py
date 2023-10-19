@@ -156,6 +156,12 @@ def parse_args():
     parser.add_argument(
         "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
     )
+    parser.add_argument(
+        "--warmup_steps_fraction",
+        type=float,
+        default=None, 
+        help="Fraction of warmupsteps of total steps. Overrides `num_warmup_steps`"
+    )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
@@ -682,6 +688,12 @@ def main():
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
+
+    if args.warmup_steps_fraction is not None:
+        if not (0 <= args.warmup_steps_fraction <= 1):
+            raise ValueError(f'`warmup_steps_fraction` has to be a float in the interval [0,1]') 
+        args.num_warmup_steps = args.warmup_steps_fraction * args.max_train_steps
+        overrode_num_warmup_steps = True
 
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
