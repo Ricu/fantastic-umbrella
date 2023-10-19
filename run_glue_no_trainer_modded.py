@@ -692,7 +692,7 @@ def main():
     if args.warmup_steps_fraction is not None:
         if not (0 <= args.warmup_steps_fraction <= 1):
             raise ValueError(f'`warmup_steps_fraction` has to be a float in the interval [0,1]') 
-        args.num_warmup_steps = args.warmup_steps_fraction * args.max_train_steps
+        args.num_warmup_steps = int(args.warmup_steps_fraction * args.max_train_steps)
         overrode_num_warmup_steps = True
 
     lr_scheduler = get_scheduler(
@@ -853,6 +853,9 @@ def main():
                 progress_bar.update(1)
                 completed_steps += 1         
 
+            if args.with_tracking:
+                accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
+
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
                     output_dir = f"step_{completed_steps }"
@@ -900,7 +903,6 @@ def main():
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
                     "train_loss": total_loss.item() / len(train_dataloader),
                     "epoch": epoch,
-                    "learning_rate" : lr_scheduler.get_last_lr()[-1],
                     "avg_train_p_max" : avg_train_p_max / len(train_dataloader),
                     "avg_eval_p_max" : avg_eval_p_max / len(eval_dataloader),
                     "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
