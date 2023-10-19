@@ -673,6 +673,7 @@ def main():
             "weight_decay": 0.0,
         },
     ]
+    args.learning_rate *=  accelerator.num_processes
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, betas=(args.beta1,args.beta2))
 
     # Scheduler and math around the number of training steps.
