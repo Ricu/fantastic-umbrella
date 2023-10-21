@@ -250,6 +250,18 @@ def parse_args():
         default=0.5,
         help="Determines the fraction of the gradient resulting from the forward pass with dropout to be inserted."
     )
+    parser.add_argument(
+        "--param_config_id",
+        type=str,
+        default=None,
+        help="Distinct ID by which the constellation of hyperparameters can be identified"
+    )
+    parser.add_argument(
+        "--run_generation",
+        type=str,
+        default=None,
+        help="The distinct generation from which the run comes"
+    )
 
     args = parser.parse_args()
 
