@@ -516,7 +516,7 @@ def main():
         patience=args.early_stopping_patience
     )]
 
-    metric.add(prediction=0,reference=0)
+    metric.add_batch(predictions=[1,1,0,0],references=[1,0,1,0])
     metric_names = list(metric.compute().keys())
     for metric_name in metric_names:
         early_stoppings.append(early_stopping_callback(
@@ -691,8 +691,8 @@ def main():
             "weight_decay": 0.0,
         },
     ]
-    args.learning_rate *=  accelerator.num_processes
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, betas=(args.beta1,args.beta2))
+    adjusted_learning_rate = args.learning_rate * accelerator.num_processes
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=adjusted_learning_rate, betas=(args.beta1,args.beta2))
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
