@@ -292,16 +292,27 @@ class Catch_Hook():
         self.hook.remove()
 
 class Insert_Hook():
-    def __init__(self, module, insertion_enabled = False, new_grad_output=None, original_gradient_fraction=0):
+    def __init__(self, module, insertion_enabled = False, new_grad_output=None, original_gradient_fraction=0, batch_size=32):
         self.new_grad_output = new_grad_output
         # use prepend=True so that this is definitely the first hook being applied
         self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
         self.insertion_enabled = insertion_enabled
         assert (0 <= original_gradient_fraction <= 1), "Gradient fraction should be between 0 and 1"
         self.original_gradient_fraction = original_gradient_fraction
+        self.vector_norms = []
+        self.rescaled_diffs = []
+        self.avg_diff_per_class = []
+        self.avg_diff_all_classes = []
+        self.batch_size = batch_size
 
     def hook_fn(self, module, grad_output):
         if self.insertion_enabled:
+            grad_diff = grad_output[0] - self.new_grad_output[0]
+            grad_diff_rescaled = grad_diff *self.batch_size
+            self.rescaled_diffs.append(grad_diff_rescaled)
+            self.vector_norms.append(torch.linalg.vector_norm(grad_diff_rescaled,dim=1))
+            self.avg_diff_per_class.append(grad_diff_rescaled.abs().mean(dim=0))
+            self.avg_diff_all_classes.append(self.avg_diff_per_class[-1].mean())
         # simply return the previously caught grad_output
         # this will replace the current grad_output (if prehook is used)
             if self.original_gradient_fraction > 0:
@@ -312,6 +323,12 @@ class Insert_Hook():
 
     def update_grad(self, new_grad_output):
         self.new_grad_output = new_grad_output
+
+    def clear_lists(self):
+        self.vector_norms = []
+        self.rescaled_diffs = []
+        self.avg_diff_per_class = []
+        self.avg_diff_all_classes = []
 
     def close(self):
         self.hook.remove()
@@ -472,7 +489,7 @@ def main():
     layer = model.classifier
     hooks = {
         'catch_hook' : Catch_Hook(layer),
-        'insert_hook' : Insert_Hook(layer,args.original_gradient_fraction)
+        'insert_hook' : Insert_Hook(layer,args.original_gradient_fraction, batch_size=args.per_device_train_batch_size)
     }
 
     # determine dropout_layers which will be activated later (skip input dropout)
@@ -637,9 +654,9 @@ def main():
         train_dataset = Subset(pre_train_dataset,train_indices)
         logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
 
-
-        eval_dataset = ConcatDataset([pre_eval_dataset,Subset(pre_train_dataset,reduced_validation_indices)])
-        logger.info(f'Adding {len(reduced_validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
+        eval_dataset = pre_eval_dataset
+        # eval_dataset = ConcatDataset([pre_eval_dataset,Subset(pre_train_dataset,reduced_validation_indices)])
+        # logger.info(f'Adding {len(reduced_validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
         
         total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -747,7 +764,9 @@ def main():
                                   init_kwargs={"wandb": {"entity": "Ricu",
                                                          "name": run_name},
                                                })
-
+        if accelerator.is_main_process:
+            wandb_tracker = accelerator.get_tracker("wandb").tracker
+            wandb_tracker.watch(model)
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -908,6 +927,16 @@ def main():
         
         eval_metrics = metric.compute()
         logger.info(f"epoch {epoch}: {eval_metrics}")
+        vector_norms = accelerator.gather_for_metrics(hooks["insert_hook"].vector_norms)
+        if isinstance(vector_norms, list):
+            vector_norms = torch.cat(vector_norms)
+        avg_grad_diffs_per_class = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_per_class)
+        if isinstance(avg_grad_diffs_per_class, list):
+            avg_grad_diffs_per_class = torch.stack(avg_grad_diffs_per_class).mean(dim=0)
+        avg_grad_diffs_all_classes = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_all_classes)
+        if isinstance(avg_grad_diffs_all_classes, list):
+            avg_grad_diffs_all_classes = torch.stack(avg_grad_diffs_all_classes).mean()
+        hooks["insert_hook"].clear_lists()
 
         if args.with_tracking:
             accelerator.log(
@@ -918,10 +947,15 @@ def main():
                     "avg_train_p_max" : avg_train_p_max / len(train_dataloader),
                     "avg_eval_p_max" : avg_eval_p_max / len(eval_dataloader),
                     "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
-                    "avg_eval_p_var" : avg_eval_p_var / len(eval_dataloader)
+                    "avg_eval_p_var" : avg_eval_p_var / len(eval_dataloader),
+                    "avg_grad_diff_all_classes" : avg_grad_diffs_all_classes,
+                    "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
+                    "vector_norms" : vector_norms
                 } | eval_metrics,
                 step=completed_steps,
             )
+            
+
 
         if args.push_to_hub and epoch < args.num_train_epochs - 1:
             accelerator.wait_for_everyone()
@@ -960,9 +994,9 @@ def main():
         if args.with_tracking:
             for es in early_stoppings:
                 if es.improved_metric and accelerator.is_main_process:
-                    wandb.run.summary[f"best_{es.metric_name}"] = es.best_value
-                    wandb.run.summary[f"best_{es.metric_name}_step"] = es.best_step
-                    wandb.run.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
+                    wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
+                    wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
+                    wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
 
         ### Stop model if neccessary
         if accelerator.check_trigger():
