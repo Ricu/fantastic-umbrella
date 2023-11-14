@@ -872,8 +872,6 @@ def main():
             avg_train_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
             avg_train_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
 
-            # print(f'DEVICE {torch.cuda.current_device()}: cls: {list(layer.parameters())}')
-
             loss = loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
             if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
@@ -926,16 +924,24 @@ def main():
         
         eval_metrics = metric.compute()
         logger.info(f"epoch {epoch}: {eval_metrics}")
-        vector_norms = accelerator.gather_for_metrics(hooks["insert_hook"].vector_norms)
-        if isinstance(vector_norms, list):
-            vector_norms = torch.cat(vector_norms)
-        avg_grad_diffs_per_class = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_per_class)
-        if isinstance(avg_grad_diffs_per_class, list):
-            avg_grad_diffs_per_class = torch.stack(avg_grad_diffs_per_class).mean(dim=0)
-        avg_grad_diffs_all_classes = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_all_classes)
-        if isinstance(avg_grad_diffs_all_classes, list):
-            avg_grad_diffs_all_classes = torch.stack(avg_grad_diffs_all_classes).mean()
-        hooks["insert_hook"].clear_lists()
+
+        diff_metrics = {}
+        if use_modded:
+            vector_norms = accelerator.gather_for_metrics(hooks["insert_hook"].vector_norms)
+            if isinstance(vector_norms, list):
+                vector_norms = torch.cat(vector_norms)
+            avg_grad_diffs_per_class = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_per_class)
+            if isinstance(avg_grad_diffs_per_class, list):
+                avg_grad_diffs_per_class = torch.stack(avg_grad_diffs_per_class).mean(dim=0)
+            avg_grad_diffs_all_classes = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_all_classes)
+            if isinstance(avg_grad_diffs_all_classes, list):
+                avg_grad_diffs_all_classes = torch.stack(avg_grad_diffs_all_classes).mean()
+            hooks["insert_hook"].clear_lists()
+            diff_metrics = {
+                "avg_grad_diff_all_classes" : avg_grad_diffs_all_classes,
+                "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
+                "vector_norms" : vector_norms
+            }
 
         if args.with_tracking:
             accelerator.log(
@@ -947,15 +953,10 @@ def main():
                     "avg_eval_p_max" : avg_eval_p_max / len(eval_dataloader),
                     "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
                     "avg_eval_p_var" : avg_eval_p_var / len(eval_dataloader),
-                    "avg_grad_diff_all_classes" : avg_grad_diffs_all_classes,
-                    "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
-                    "vector_norms" : vector_norms
-                } | eval_metrics,
+                } | eval_metrics | diff_metrics,
                 step=completed_steps,
             )
             
-
-
         if args.push_to_hub and epoch < args.num_train_epochs - 1:
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
