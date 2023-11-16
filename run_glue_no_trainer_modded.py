@@ -374,6 +374,53 @@ class early_stopping_callback:
             return True
     return False
   
+def evaluate_model(
+        model,
+        eval_dataloader,
+        accelerator,
+        metric,
+        softmax_fn,
+        is_regression,
+        p_metrics_dict=None
+    ):
+
+    if p_metrics_dict is None:
+        p_metrics_dict = {}
+    p_metrics_dict["avg_eval_p_max"] = 0
+    p_metrics_dict["avg_eval_p_var"] = 0
+
+    
+    samples_seen = 0
+    eval_loss = 0
+    model.eval()
+    for step, batch in enumerate(eval_dataloader):
+        with torch.no_grad():
+            outputs = model(**batch)
+            eval_loss += outputs.loss.detach().float()
+            p_metrics_dict["avg_eval_p_max"] += softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean()
+            p_metrics_dict["avg_eval_p_var"] += softmax_fn(outputs.logits.detach()).var(dim=1).mean()
+
+        predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
+        predictions, references = accelerator.gather((predictions, batch["labels"]))
+        # If we are in a multiprocess environment, the last batch has duplicates
+        if accelerator.num_processes > 1:
+            if step == len(eval_dataloader) - 1:
+                predictions = predictions[: len(eval_dataloader.dataset) - samples_seen]
+                references = references[: len(eval_dataloader.dataset) - samples_seen]
+            else:
+                samples_seen += references.shape[0]
+        metric.add_batch(
+            predictions=predictions,
+            references=references,
+        )
+    
+    p_metrics_dict["avg_eval_p_max"] = p_metrics_dict["avg_eval_p_max"] / len(eval_dataloader)
+    p_metrics_dict["avg_eval_p_var"] = p_metrics_dict["avg_eval_p_var"] / len(eval_dataloader)
+
+    eval_metrics = metric.compute()
+    return eval_loss, eval_metrics, p_metrics_dict
+
+
 def main():
     args = parse_args()
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
@@ -894,35 +941,16 @@ def main():
             if completed_steps >= args.max_train_steps:
                 break
 
-
-        model.eval()
-        samples_seen = 0
-        eval_loss = 0
-        avg_eval_p_max = 0
-        avg_eval_p_var = 0
-
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                outputs = model(**batch)
-                eval_loss += outputs.loss.detach().float()
-                avg_eval_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
-                avg_eval_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
-
-            predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
-            predictions, references = accelerator.gather((predictions, batch["labels"]))
-            # If we are in a multiprocess environment, the last batch has duplicates
-            if accelerator.num_processes > 1:
-                if step == len(eval_dataloader) - 1:
-                    predictions = predictions[: len(eval_dataloader.dataset) - samples_seen]
-                    references = references[: len(eval_dataloader.dataset) - samples_seen]
-                else:
-                    samples_seen += references.shape[0]
-            metric.add_batch(
-                predictions=predictions,
-                references=references,
-            )
-        
-        eval_metrics = metric.compute()
+        p_metrics_dict = {}
+        eval_loss, eval_metrics, p_metrics_dict = evaluate_model(
+            model=model,
+            eval_dataloader=eval_dataloader,
+            accelerator=accelerator,
+            metric=metric,
+            softmax_fn=softmax,
+            is_regression=is_regression,
+            p_metrics_dict=p_metrics_dict
+        )
         logger.info(f"epoch {epoch}: {eval_metrics}")
 
         diff_metrics = {}
@@ -950,10 +978,8 @@ def main():
                     "train_loss": total_loss.item() / len(train_dataloader),
                     "epoch": epoch,
                     "avg_train_p_max" : avg_train_p_max / len(train_dataloader),
-                    "avg_eval_p_max" : avg_eval_p_max / len(eval_dataloader),
                     "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
-                    "avg_eval_p_var" : avg_eval_p_var / len(eval_dataloader),
-                } | eval_metrics | diff_metrics,
+                } | eval_metrics | diff_metrics | p_metrics_dict,
                 step=completed_steps,
             )
             
