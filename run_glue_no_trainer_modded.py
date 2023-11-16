@@ -374,6 +374,40 @@ class early_stopping_callback:
             return True
     return False
   
+def prepare_fumbrella(
+        model,
+        layer,
+        batch_size,
+        catch_dropout,
+        insert_dropout,
+        original_gradient_fraction = 0
+    ):
+    hooks = {
+        'catch_hook' : Catch_Hook(layer),
+        'insert_hook' : Insert_Hook(layer,original_gradient_fraction, batch_size=batch_size)
+    }
+    # determine dropout_layers which will be activated later (skip input dropout)
+    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
+    
+    # set the dropout values for the catch run
+    if 0 <= catch_dropout <= 1:
+        catch_dropouts = [catch_dropout for _ in dropout_modules]
+    else:
+        catch_dropouts = [module.p for module in dropout_modules]
+        
+    # set the dropout values for the insertion run
+    if  0 <= insert_dropout <= 1:
+        insert_dropouts = [insert_dropout for _ in dropout_modules]
+    else: 
+        insert_dropouts = [module.p for module in dropout_modules]
+
+    # initialize the dropout to the desired value. If no insertion is done, this dropout values
+    # will be used as the standard dropout value.
+    for module, p in zip(dropout_modules,insert_dropouts):
+        module.p = p
+    
+    return hooks, catch_dropouts, insert_dropouts
+
 def evaluate_model(
         model,
         eval_dataloader,
@@ -540,38 +574,17 @@ def main():
 
     softmax = torch.nn.Softmax(dim=1)
 
-    #++++++++++++++++++ attach hooks to the last layer ++++++++++++++++++++++++#
-    layer = model.classifier
-    hooks = {
-        'catch_hook' : Catch_Hook(layer),
-        'insert_hook' : Insert_Hook(layer,args.original_gradient_fraction, batch_size=args.per_device_train_batch_size)
-    }
-
-    # determine dropout_layers which will be activated later (skip input dropout)
-    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
-    
+    # Prepare the fumbrella method
     use_modded = not (args.catch_dropout is None)
-    
-    # set the dropout values for the catch run
     if use_modded:
-        if 0 <= args.catch_dropout <= 1:
-            catch_dropouts = [args.catch_dropout for _ in dropout_modules]
-        else:
-            catch_dropouts = [module.p for module in dropout_modules]
-        
-
-    # set the dropout values for the insertion run
-    if  0 <= args.insert_dropout <= 1:
-        insert_dropouts = [args.insert_dropout for _ in dropout_modules]
-    else: 
-        insert_dropouts = [module.p for module in dropout_modules]
-
-    # initialize the dropout to the desired value. If no insertion is done, this dropout values
-    # will be used as the standard dropout value.
-    for module, p in zip(dropout_modules,insert_dropouts):
-        module.p = p
-
-    #++++++++++++++++++ \attach hooks to the last layer ++++++++++++++++++++++++#
+        hooks, catch_dropouts, insert_dropouts = prepare_fumbrella(
+            model=model,
+            layer=model.classifier,
+            batch_size=args.per_device_train_batch_size,
+            catch_dropout=args.catch_dropout,
+            insert_dropout=args.insert_dropout,
+            original_gradient_fraction=args.original_gradient_fraction
+        )
 
     # Get the metric function
     if args.task_name is not None:
