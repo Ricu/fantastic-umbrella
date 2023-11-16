@@ -50,7 +50,7 @@ from transformers.utils.versions import require_version
 
 from dotenv import load_dotenv
 import os
-import wandb
+
 load_dotenv("./.env")
 WANDB_API_KEY = os.getenv("WANDB_API_KEY")
 
