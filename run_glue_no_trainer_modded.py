@@ -887,7 +887,7 @@ def main():
         
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
-        total_loss = 0
+        train_loss = 0
         avg_train_p_max = 0
         avg_train_p_var = 0
 
@@ -941,7 +941,7 @@ def main():
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
-            total_loss += loss.detach().float()
+            train_loss += loss.detach().float()
             avg_train_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
             avg_train_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
 
@@ -1001,7 +1001,7 @@ def main():
             accelerator.log(
                 {
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
-                    "train_loss": total_loss.item() / len(train_dataloader),
+                    "train_loss": train_loss.item() / len(train_dataloader),
                     "epoch": epoch,
                     "avg_train_p_max" : avg_train_p_max / len(train_dataloader),
                     "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
