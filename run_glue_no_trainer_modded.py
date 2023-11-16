@@ -880,7 +880,7 @@ def main():
         accelerator.log(
             {
                 "eval_loss": eval_loss.item() / len(eval_dataloader),
-                "epoch": epoch,
+                "epoch": -1,
             } | eval_metrics | p_metrics_dict,
             step=completed_steps,
         )
