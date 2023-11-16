@@ -864,9 +864,27 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
-    # allow training to be stopped via variable
-    # training_running = True
-
+    # do initial evaluation of model as sanity check
+    p_metrics_dict = {}
+    eval_loss, eval_metrics, p_metrics_dict = evaluate_model(
+        model=model,
+        eval_dataloader=eval_dataloader,
+        accelerator=accelerator,
+        metric=metric,
+        softmax_fn=softmax,
+        is_regression=is_regression,
+        p_metrics_dict=p_metrics_dict
+    )
+    logger.info(f"epoch initial model: {eval_metrics}")
+    if args.with_tracking:
+        accelerator.log(
+            {
+                "eval_loss": eval_loss.item() / len(eval_dataloader),
+                "epoch": epoch,
+            } | eval_metrics | p_metrics_dict,
+            step=completed_steps,
+        )
+        
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         total_loss = 0
