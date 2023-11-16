@@ -24,6 +24,8 @@ from pathlib import Path
 import datasets
 import evaluate
 import torch
+from torch.profiler import profile, record_function, ProfilerActivity, schedule
+
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
@@ -373,7 +375,10 @@ class early_stopping_callback:
         if self.wait_steps >= self.patience:
             return True
     return False
-  
+
+def prepare_dataloaders():
+    return
+
 def prepare_fumbrella(
         model,
         layer,
@@ -407,6 +412,74 @@ def prepare_fumbrella(
         module.p = p
     
     return hooks, dropout_modules, catch_dropouts, insert_dropouts
+
+def stage1_pass(
+        accelerator,
+        model,
+        optimizer,
+        batch,
+        hooks,
+        dropout_modules,
+        catch_dropouts,
+        insert_dropouts,
+        modules_require_grad
+):
+    model.train()
+    # Stop syncing the gradients when freezing parts of the model.
+    with accelerator.no_sync(model):
+        # disable gradient insertion for catch run
+        hooks['insert_hook'].disable_insertion()
+
+        # set the dropout to the desired value during the catch run
+        for module, p in zip(dropout_modules,catch_dropouts):
+            module.p = p
+        
+        # freeze all layers except for the last
+        for named_param in model.named_parameters():
+            if 'classifier' not in named_param[0]:
+                named_param[1].requires_grad = False
+        
+
+        optimizer.zero_grad()
+        outputs = model(**batch)
+        loss = outputs.loss
+        accelerator.backward(loss)
+
+        # update gradient to be inserted
+        hooks['insert_hook'].update_grad(hooks['catch_hook'].caught_grad)
+
+        # set the dropout to the desired value during the insertion run
+        for module, p in zip(dropout_modules,insert_dropouts):
+            module.p = p
+        
+        # unfreeze all layers as they have been before
+        for named_param in model.named_parameters():
+            named_param[1].requires_grad = modules_require_grad[named_param[0]]
+
+        # re-enable gradient insertion for insertion run
+        hooks['insert_hook'].enable_insertion()
+
+def stage2_pass(
+        accelerator,
+        model,
+        optimizer,
+        batch,
+        softmax_fn,
+        gradient_accumulation_steps,
+        p_metrics_dict
+    ):
+    model.train()  
+    optimizer.zero_grad()
+    outputs = model(**batch)
+    loss = outputs.loss
+    # We keep track of the loss at each epoch
+    train_loss = loss.detach().float()
+    p_metrics_dict["avg_train_p_max"] += softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean()
+    p_metrics_dict["avg_train_p_var"] += softmax_fn(outputs.logits.detach()).var(dim=1).mean()
+
+    loss = loss / gradient_accumulation_steps
+    accelerator.backward(loss)
+    return train_loss  
 
 def evaluate_model(
         model,
@@ -574,18 +647,7 @@ def main():
 
     softmax = torch.nn.Softmax(dim=1)
 
-    # Prepare the fumbrella method
-    use_modded = not (args.catch_dropout is None)
-    if use_modded:
-        hooks, dropout_modules, catch_dropouts, insert_dropouts = prepare_fumbrella(
-            model=model,
-            layer=model.classifier,
-            batch_size=args.per_device_train_batch_size,
-            catch_dropout=args.catch_dropout,
-            insert_dropout=args.insert_dropout,
-            original_gradient_fraction=args.original_gradient_fraction
-        )
-
+    
     # Get the metric function
     if args.task_name is not None:
         metric = evaluate.load("glue", args.task_name)
@@ -808,9 +870,20 @@ def main():
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
 
-    modules_require_grad = {
-        named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
-    }
+    # Prepare the fumbrella method
+    use_modded = not (args.catch_dropout is None)
+    if use_modded:
+        hooks, dropout_modules, catch_dropouts, insert_dropouts = prepare_fumbrella(
+            model=model,
+            layer=model.classifier,
+            batch_size=args.per_device_train_batch_size,
+            catch_dropout=args.catch_dropout,
+            insert_dropout=args.insert_dropout,
+            original_gradient_fraction=args.original_gradient_fraction
+        )
+        modules_require_grad = {
+            named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
+        }
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -904,88 +977,89 @@ def main():
         )
         
     for epoch in range(starting_epoch, args.num_train_epochs):
-        model.train()
-        train_loss = 0
-        avg_train_p_max = 0
-        avg_train_p_var = 0
-
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
 
-        for step, batch in enumerate(active_dataloader):
-            model.train()
-            if use_modded:
-                # Stop syncing the gradients when freezing parts of the model.
-                with accelerator.no_sync(model):
-                    # #++++++++ catch gradient ++++++++#
-                    # disable gradient insertion for catch run
-                    hooks['insert_hook'].disable_insertion()
+        train_loss = 0
+        p_metrics_dict = {
+            "avg_train_p_max" : 0,
+            "avg_train_p_var" : 0
+        }
+        
+        def trace_handler(p):
+            p.export_chrome_trace("/home/lange/fantastic-umbrella/tmp/trace_" + str(p.step_num) + ".json")
 
-                    # set the dropout to the desired value during the catch run
-                    for module, p in zip(dropout_modules,catch_dropouts):
-                        module.p = p
-                    
-                    # freeze all layers except for the last
-                    for named_param in model.named_parameters():
-                        if 'classifier' not in named_param[0]:
-                            named_param[1].requires_grad = False
-                    
+        with profile(
+            activities=[ProfilerActivity.CPU,ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            use_cuda=True,
+            schedule=schedule(
+                # skip_first=10,
+                wait=5,
+                warmup=2,
+                active=3,
+                repeat=2
+            ),
+            on_trace_ready=trace_handler
+        ) as p:
+            for step, batch in enumerate(active_dataloader):
+                with record_function("stage1"):
+                    if use_modded:
+                        stage1_pass(
+                                accelerator=accelerator,
+                                model=model,
+                                optimizer=optimizer,
+                                batch=batch,
+                                hooks=hooks,
+                                dropout_modules=dropout_modules,
+                                catch_dropouts=catch_dropouts,
+                                insert_dropouts=insert_dropouts,
+                                modules_require_grad=modules_require_grad
+                        )
+                with record_function("stage2"):
+                    pass_loss = stage2_pass(
+                        accelerator=accelerator,
+                        model=model,
+                        optimizer=optimizer,
+                        batch=batch,
+                        softmax_fn=softmax,
+                        gradient_accumulation_steps=args.gradient_accumulation_steps,
+                        p_metrics_dict=p_metrics_dict
+                    )
 
+                train_loss += pass_loss
+
+                if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                    optimizer.step()
+                    lr_scheduler.step()
                     optimizer.zero_grad()
-                    outputs = model(**batch)
-                    loss = outputs.loss
-                    accelerator.backward(loss)
+                    progress_bar.update(1)
+                    completed_steps += 1
+                    p.step()    
 
-                    # update gradient to be inserted
-                    hooks['insert_hook'].update_grad(hooks['catch_hook'].caught_grad)
+                if args.with_tracking:
+                    accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
 
-                    # set the dropout to the desired value during the insertion run
-                    for module, p in zip(dropout_modules,insert_dropouts):
-                        module.p = p
-                    
-                    # unfreeze all layers as they have been before
-                    for named_param in model.named_parameters():
-                        named_param[1].requires_grad = modules_require_grad[named_param[0]]
+                if isinstance(checkpointing_steps, int):
+                    if completed_steps % checkpointing_steps == 0:
+                        output_dir = f"step_{completed_steps }"
+                        if args.output_dir is not None:
+                            output_dir = os.path.join(args.output_dir, output_dir)
+                        accelerator.save_state(output_dir)
 
-                    # re-enable gradient insertion for insertion run
-                    hooks['insert_hook'].enable_insertion()
-                    # #++++++++ \catch gradient ++++++++#
+                if completed_steps >= args.max_train_steps:
+                    break
+        
+        # epoch end
+        # prof.export_chrome_trace("trace.json")
 
-                
-            optimizer.zero_grad()
-            outputs = model(**batch)
-            loss = outputs.loss
-            # We keep track of the loss at each epoch
-            train_loss += loss.detach().float()
-            avg_train_p_max += softmax(outputs.logits.detach()).max(dim=1)[0].mean()
-            avg_train_p_var += softmax(outputs.logits.detach()).var(dim=1).mean()
+        p_metrics_dict["avg_train_p_max"] /= len(train_dataloader)
+        p_metrics_dict["avg_train_p_var"] /= len(train_dataloader)
 
-            loss = loss / args.gradient_accumulation_steps
-            accelerator.backward(loss)
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1         
-
-            if args.with_tracking:
-                accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
-
-            if isinstance(checkpointing_steps, int):
-                if completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps }"
-                    if args.output_dir is not None:
-                        output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
-
-            if completed_steps >= args.max_train_steps:
-                break
-
-        p_metrics_dict = {}
         eval_loss, eval_metrics, p_metrics_dict = evaluate_model(
             model=model,
             eval_dataloader=eval_dataloader,
@@ -1014,15 +1088,14 @@ def main():
                 "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
                 "vector_norms" : vector_norms
             }
-
+        
+        # gathered_eval_loss = torch.stack(accelerator.gather_for_metrics(eval_loss)).mean().item()
         if args.with_tracking:
             accelerator.log(
                 {
                     "eval_loss": eval_loss.item() / len(eval_dataloader),
                     "train_loss": train_loss.item() / len(train_dataloader),
                     "epoch": epoch,
-                    "avg_train_p_max" : avg_train_p_max / len(train_dataloader),
-                    "avg_train_p_var" : avg_train_p_var / len(train_dataloader),
                 } | eval_metrics | diff_metrics | p_metrics_dict,
                 step=completed_steps,
             )
