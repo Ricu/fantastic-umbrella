@@ -406,7 +406,7 @@ def prepare_fumbrella(
     for module, p in zip(dropout_modules,insert_dropouts):
         module.p = p
     
-    return hooks, catch_dropouts, insert_dropouts
+    return hooks, dropout_modules, catch_dropouts, insert_dropouts
 
 def evaluate_model(
         model,
@@ -577,7 +577,7 @@ def main():
     # Prepare the fumbrella method
     use_modded = not (args.catch_dropout is None)
     if use_modded:
-        hooks, catch_dropouts, insert_dropouts = prepare_fumbrella(
+        hooks, dropout_modules, catch_dropouts, insert_dropouts = prepare_fumbrella(
             model=model,
             layer=model.classifier,
             batch_size=args.per_device_train_batch_size,
