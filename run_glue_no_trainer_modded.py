@@ -414,10 +414,18 @@ def evaluate_model(
             references=references,
         )
     
+    # Calculate local metrics
     p_metrics_dict["avg_eval_p_max"] = p_metrics_dict["avg_eval_p_max"] / len(eval_dataloader)
     p_metrics_dict["avg_eval_p_var"] = p_metrics_dict["avg_eval_p_var"] / len(eval_dataloader)
+    eval_loss = eval_loss / len(eval_dataloader)
+    eval_metrics = metric.compute() # HF evaluate metrics always compute global metric
 
-    eval_metrics = metric.compute()
+    if accelerator.num_processes > 1:
+        # Calculate global metrics
+        p_metrics_dict["avg_eval_p_max"] = accelerator.gather(p_metrics_dict["avg_eval_p_max"]).mean()
+        p_metrics_dict["avg_eval_p_var"] = accelerator.gather(p_metrics_dict["avg_eval_p_var"]).mean()
+        eval_loss = accelerator.gather(eval_loss).mean()
+
     return eval_loss, eval_metrics, p_metrics_dict
 
 
