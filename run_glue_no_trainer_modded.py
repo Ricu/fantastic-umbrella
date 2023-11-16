@@ -593,23 +593,28 @@ def main():
         metric = evaluate.load("accuracy")
 
     #++++++++++++++++++ create early stopping callback  ++++++++++++++++++++++++#
-    # Eval loss
-    early_stoppings = [early_stopping_callback(
-        metric_name='eval_loss',
-        direction='min',
-        min_delta=args.early_stopping_min_delta,
-        patience=args.early_stopping_patience
-    )]
+    # create early stopping for minimizing evaluators
+    early_stoppings = [
+        early_stopping_callback(
+            metric_name='eval_loss',
+            direction='min',
+            min_delta=args.early_stopping_min_delta,
+            patience=args.early_stopping_patience
+        )
+    ]
 
+    # create early stopping for maximizing evaluators
     metric.add_batch(predictions=[1,1,0,0],references=[1,0,1,0])
     metric_names = list(metric.compute().keys())
     for metric_name in metric_names:
-        early_stoppings.append(early_stopping_callback(
-            metric_name=metric_name,
-            direction='max',
-            min_delta=args.early_stopping_min_delta,
-            patience=args.early_stopping_patience
-    ))
+        early_stoppings.append(
+            early_stopping_callback(
+                metric_name=metric_name,
+                direction='max',
+                min_delta=args.early_stopping_min_delta,
+                patience=args.early_stopping_patience
+            )
+        )
     #++++++++++++++++++ \create early stopping callback ++++++++++++++++++++++++#
 
 
