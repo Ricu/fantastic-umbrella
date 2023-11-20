@@ -264,6 +264,12 @@ def parse_args():
         default=None,
         help="The distinct generation from which the run comes"
     )
+    parser.add_argument(
+        "--evaluation_steps",
+        type=int,
+        default=None,
+        help="Number of steps until one evaluation is performed."
+    )
 
     args = parser.parse_args()
 
@@ -341,7 +347,7 @@ class Insert_Hook():
     def disable_insertion(self):
         self.insertion_enabled = False
 
-class early_stopping_callback:
+class EarlyStoppingCallback:
   def __init__(self,metric_name,direction='min',min_delta=0,patience=5):
     '''
     `direction` is either 'min' or 'max' 
@@ -465,22 +471,55 @@ def stage2_pass(
         optimizer,
         batch,
         softmax_fn,
-        gradient_accumulation_steps,
-        p_metrics_dict
+        gradient_accumulation_steps
     ):
     model.train()  
     optimizer.zero_grad()
     outputs = model(**batch)
     loss = outputs.loss
     # We keep track of the loss at each epoch
-    train_loss = loss.detach().float()
-    p_metrics_dict["avg_train_p_max"] += softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean()
-    p_metrics_dict["avg_train_p_var"] += softmax_fn(outputs.logits.detach()).var(dim=1).mean()
+    train_stats = {
+        "train_loss" : loss.detach().float(),
+        "train_p_max" : softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean(),
+        "train_p_var" : softmax_fn(outputs.logits.detach()).var(dim=1).mean()
+    }
 
     loss = loss / gradient_accumulation_steps
     accelerator.backward(loss)
-    return train_loss  
+    return train_stats
 
+
+
+class TrainStatsHelper():
+    def __init__(self,evaluation_steps : int):
+        self.initialize_stats()
+        self.evaluation_steps = evaluation_steps
+
+    def initialize_stats(self):
+        self.stats_dict = {}
+    
+    def add_stats(self,stats : dict):
+        for stats_name, stats_value in stats.items():
+            if stats_name in self.stats_dict:
+                self.stats_dict[stats_name] += stats_value
+            else:
+                self.stats_dict[stats_name] = stats_value
+
+    def compute_stats(self, avg_factor = None, accelerator = None):
+        if avg_factor is None:
+            avg_factor = self.evaluation_steps
+
+        for stats_name, stats_value in self.stats_dict.items():
+            self.stats_dict[stats_name] = stats_value / avg_factor
+
+        if accelerator is not None and accelerator.num_processes > 1:
+            for stats_name, stats_value in self.stats_dict.item():
+                self.stats_dict[stats_name] = accelerator.gather(stats_value).mean()
+
+        return self.stats_dict
+
+
+    
 def evaluate_model(
         model,
         eval_dataloader,
@@ -488,24 +527,23 @@ def evaluate_model(
         metric,
         softmax_fn,
         is_regression,
-        p_metrics_dict=None
     ):
 
-    if p_metrics_dict is None:
-        p_metrics_dict = {}
-    p_metrics_dict["avg_eval_p_max"] = 0
-    p_metrics_dict["avg_eval_p_var"] = 0
+    validation_stats = {
+        "eval_loss" : 0,
+        "eval_p_max": 0,
+        "eval_p_var" : 0
+    }
 
     
     samples_seen = 0
-    eval_loss = 0
     model.eval()
     for step, batch in enumerate(eval_dataloader):
         with torch.no_grad():
             outputs = model(**batch)
-            eval_loss += outputs.loss.detach().float()
-            p_metrics_dict["avg_eval_p_max"] += softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean()
-            p_metrics_dict["avg_eval_p_var"] += softmax_fn(outputs.logits.detach()).var(dim=1).mean()
+            validation_stats["eval_loss"] += outputs.loss.detach().float()
+            validation_stats["eval_p_max"] += softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean()
+            validation_stats["eval_p_var"] += softmax_fn(outputs.logits.detach()).var(dim=1).mean()
 
         predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
         predictions, references = accelerator.gather((predictions, batch["labels"]))
@@ -522,18 +560,20 @@ def evaluate_model(
         )
     
     # Calculate local metrics
-    p_metrics_dict["avg_eval_p_max"] = p_metrics_dict["avg_eval_p_max"] / len(eval_dataloader)
-    p_metrics_dict["avg_eval_p_var"] = p_metrics_dict["avg_eval_p_var"] / len(eval_dataloader)
-    eval_loss = eval_loss / len(eval_dataloader)
-    eval_metrics = metric.compute() # HF evaluate metrics always compute global metric
+    validation_stats["eval_p_max"] = validation_stats["eval_p_max"] / len(eval_dataloader)
+    validation_stats["eval_p_var"] = validation_stats["eval_p_var"] / len(eval_dataloader)
+    validation_stats["eval_loss"] = validation_stats["eval_loss"] / len(eval_dataloader)
+    
 
     if accelerator.num_processes > 1:
         # Calculate global metrics
-        p_metrics_dict["avg_eval_p_max"] = accelerator.gather(p_metrics_dict["avg_eval_p_max"]).mean()
-        p_metrics_dict["avg_eval_p_var"] = accelerator.gather(p_metrics_dict["avg_eval_p_var"]).mean()
-        eval_loss = accelerator.gather(eval_loss).mean()
+        validation_stats["eval_p_max"] = accelerator.gather(validation_stats["eval_p_max"]).mean()
+        validation_stats["avg_eval_p_var"] = accelerator.gather(validation_stats["avg_eval_p_var"]).mean()
+        validation_stats["eval_loss"] = accelerator.gather(validation_stats["eval_loss"]).mean()
 
-    return eval_loss, eval_metrics, p_metrics_dict
+    validation_stats = validation_stats | metric.compute() # HF evaluate metrics always compute global metric
+
+    return validation_stats
 
 
 def main():
@@ -657,7 +697,7 @@ def main():
     #++++++++++++++++++ create early stopping callback  ++++++++++++++++++++++++#
     # create early stopping for minimizing evaluators
     early_stoppings = [
-        early_stopping_callback(
+        EarlyStoppingCallback(
             metric_name='eval_loss',
             direction='min',
             min_delta=args.early_stopping_min_delta,
@@ -670,7 +710,7 @@ def main():
     metric_names = list(metric.compute().keys())
     for metric_name in metric_names:
         early_stoppings.append(
-            early_stopping_callback(
+            EarlyStoppingCallback(
                 metric_name=metric_name,
                 direction='max',
                 min_delta=args.early_stopping_min_delta,
@@ -955,40 +995,37 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
+
+    # set up training stats helper
+    if args.evaluation_steps is None:
+        args.evaluation_steps = len(train_dataloader)
+    train_stats_helper = TrainStatsHelper(
+        evaluation_steps = args.evaluation_steps
+    )
     # do initial evaluation of model as sanity check
-    p_metrics_dict = {}
-    eval_loss, eval_metrics, p_metrics_dict = evaluate_model(
+    validation_stats = evaluate_model(
         model=model,
         eval_dataloader=eval_dataloader,
         accelerator=accelerator,
         metric=metric,
         softmax_fn=softmax,
         is_regression=is_regression,
-        p_metrics_dict=p_metrics_dict
     )
-    logger.info(f"epoch initial model: {eval_metrics}")
     if args.with_tracking:
         accelerator.log(
-            {
-                "eval_loss": eval_loss.item() / len(eval_dataloader),
-                "epoch": -1,
-            } | eval_metrics | p_metrics_dict,
+            {"epoch": -1} | validation_stats,
             step=completed_steps,
         )
-        
+    logger.info(f"epoch initial model: {validation_stats}")
+    
+
     for epoch in range(starting_epoch, args.num_train_epochs):
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
-
-        train_loss = 0
-        p_metrics_dict = {
-            "avg_train_p_max" : 0,
-            "avg_train_p_var" : 0
-        }
-        
+       
         def trace_handler(p):
             p.export_chrome_trace("/home/lange/fantastic-umbrella/tmp/trace_" + str(p.step_num) + ".json")
 
@@ -996,15 +1033,14 @@ def main():
             activities=[ProfilerActivity.CPU,ProfilerActivity.CUDA],
             record_shapes=True,
             profile_memory=True,
-            use_cuda=True,
             schedule=schedule(
                 # skip_first=10,
-                wait=5,
-                warmup=2,
-                active=3,
-                repeat=2
+                wait=0,
+                warmup=0,
+                active=1,
+                repeat=1
             ),
-            on_trace_ready=trace_handler
+            # on_trace_ready=trace_handler
         ) as p:
             for step, batch in enumerate(active_dataloader):
                 with record_function("stage1"):
@@ -1021,17 +1057,16 @@ def main():
                                 modules_require_grad=modules_require_grad
                         )
                 with record_function("stage2"):
-                    pass_loss = stage2_pass(
+                    train_stats = stage2_pass(
                         accelerator=accelerator,
                         model=model,
                         optimizer=optimizer,
                         batch=batch,
                         softmax_fn=softmax,
                         gradient_accumulation_steps=args.gradient_accumulation_steps,
-                        p_metrics_dict=p_metrics_dict
                     )
 
-                train_loss += pass_loss
+                train_stats_helper.add_stats(train_stats)
 
                 if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                     optimizer.step()
@@ -1044,120 +1079,147 @@ def main():
                 if args.with_tracking:
                     accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
 
-                if isinstance(checkpointing_steps, int):
-                    if completed_steps % checkpointing_steps == 0:
-                        output_dir = f"step_{completed_steps }"
-                        if args.output_dir is not None:
-                            output_dir = os.path.join(args.output_dir, output_dir)
-                        accelerator.save_state(output_dir)
+                # if isinstance(checkpointing_steps, int):
+                #     if completed_steps % checkpointing_steps == 0:
+                #         output_dir = f"step_{completed_steps }"
+                #         if args.output_dir is not None:
+                #             output_dir = os.path.join(args.output_dir, output_dir)
+                #         accelerator.save_state(output_dir)
+
+
+                # Evaluation, tracking and early stopping in given interval
+                if completed_steps % args.evaluation_steps == 0:
+                    validation_stats = evaluate_model(
+                        model=model,
+                        eval_dataloader=eval_dataloader,
+                        accelerator=accelerator,
+                        metric=metric,
+                        softmax_fn=softmax,
+                        is_regression=is_regression,
+                    )
+                    computed_training_stats = train_stats_helper.compute_stats()
+                    train_stats_helper.initialize_stats()
+                    if args.with_tracking:
+                        accelerator.log(
+                            {"epoch" : epoch} | validation_stats | computed_training_stats,
+                            step=completed_steps,
+                        )
+                
+                    metrics_ready_to_stop = [es.check_early_stopping(validation_stats[es.metric_name],epoch,completed_steps) for es in early_stoppings]
+                    if all(metrics_ready_to_stop):
+                        accelerator.set_trigger()
+                        logger.info(f"Stopping early after epoch {epoch}.")
+                        for es in early_stoppings:
+                            logger.info(
+                                'Achieved best value ({}) for metric {} at in epoch {}'.format(
+                                    es.best_value,
+                                    es.metric_name,
+                                    es.best_epoch
+                                )
+                            )
+                    # update best values
+                    if args.with_tracking:
+                        for es in early_stoppings:
+                            if es.improved_metric and accelerator.is_main_process:
+                                wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
+                                wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
+                                wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
+
+                    ### Stop model if neccessary
+                    if accelerator.check_trigger():
+                        break
 
                 if completed_steps >= args.max_train_steps:
                     break
+
         
         # epoch end
         # prof.export_chrome_trace("trace.json")
 
-        p_metrics_dict["avg_train_p_max"] /= len(train_dataloader)
-        p_metrics_dict["avg_train_p_var"] /= len(train_dataloader)
+        # Do additional evaluation if final epoch and have some remaining steps
+        if (epoch == args.num_train_epochs-1) and (remaining_steps := completed_steps%args.evaluation_steps != 0):
+            # collect validation results
+            validation_stats = evaluate_model(
+                model=model,
+                eval_dataloader=eval_dataloader,
+                accelerator=accelerator,
+                metric=metric,
+                softmax_fn=softmax,
+                is_regression=is_regression,
+            )
+            # collect training results
+            computed_training_stats = train_stats_helper.compute_stats(avg_factor=remaining_steps)
 
-        eval_loss, eval_metrics, p_metrics_dict = evaluate_model(
-            model=model,
-            eval_dataloader=eval_dataloader,
-            accelerator=accelerator,
-            metric=metric,
-            softmax_fn=softmax,
-            is_regression=is_regression,
-            p_metrics_dict=p_metrics_dict
-        )
-        logger.info(f"epoch {epoch}: {eval_metrics}")
-
-        diff_metrics = {}
-        if use_modded:
-            vector_norms = accelerator.gather_for_metrics(hooks["insert_hook"].vector_norms)
-            if isinstance(vector_norms, list):
-                vector_norms = torch.cat(vector_norms)
-            avg_grad_diffs_per_class = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_per_class)
-            if isinstance(avg_grad_diffs_per_class, list):
-                avg_grad_diffs_per_class = torch.stack(avg_grad_diffs_per_class).mean(dim=0)
-            avg_grad_diffs_all_classes = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_all_classes)
-            if isinstance(avg_grad_diffs_all_classes, list):
-                avg_grad_diffs_all_classes = torch.stack(avg_grad_diffs_all_classes).mean()
-            hooks["insert_hook"].clear_lists()
-            diff_metrics = {
-                "avg_grad_diff_all_classes" : avg_grad_diffs_all_classes,
-                "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
-                "vector_norms" : vector_norms
-            }
+            diff_metrics = {}
+            if use_modded:
+                vector_norms = accelerator.gather_for_metrics(hooks["insert_hook"].vector_norms)
+                if isinstance(vector_norms, list):
+                    vector_norms = torch.cat(vector_norms)
+                avg_grad_diffs_per_class = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_per_class)
+                if isinstance(avg_grad_diffs_per_class, list):
+                    avg_grad_diffs_per_class = torch.stack(avg_grad_diffs_per_class).mean(dim=0)
+                avg_grad_diffs_all_classes = accelerator.gather_for_metrics(hooks["insert_hook"].avg_diff_all_classes)
+                if isinstance(avg_grad_diffs_all_classes, list):
+                    avg_grad_diffs_all_classes = torch.stack(avg_grad_diffs_all_classes).mean()
+                hooks["insert_hook"].clear_lists()
+                diff_metrics = {
+                    "avg_grad_diff_all_classes" : avg_grad_diffs_all_classes,
+                    "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
+                    "vector_norms" : vector_norms
+                }
         
-        # gathered_eval_loss = torch.stack(accelerator.gather_for_metrics(eval_loss)).mean().item()
-        if args.with_tracking:
-            accelerator.log(
-                {
-                    "eval_loss": eval_loss.item() / len(eval_dataloader),
-                    "train_loss": train_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                } | eval_metrics | diff_metrics | p_metrics_dict,
-                step=completed_steps,
-            )
-            
-        if args.push_to_hub and epoch < args.num_train_epochs - 1:
-            accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(
-                args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-            )
-            if accelerator.is_main_process:
-                tokenizer.save_pretrained(args.output_dir)
-                repo.push_to_hub(
-                    commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+            if args.with_tracking: 
+                accelerator.log(
+                    {"epoch" : epoch} | validation_stats | diff_metrics | computed_training_stats,
+                    step=completed_steps,
                 )
+            metrics_ready_to_stop = [es.check_early_stopping(validation_stats[es.metric_name],epoch,completed_steps) for es in early_stoppings]
+            if args.with_tracking:
+                for es in early_stoppings:
+                    if es.improved_metric and accelerator.is_main_process:
+                        wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
+                        wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
+                        wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
 
-        if args.checkpointing_steps == "epoch":
-            output_dir = f"epoch_{epoch}"
-            if args.output_dir is not None:
-                output_dir = os.path.join(args.output_dir, output_dir)
-            accelerator.save_state(output_dir)
+        logger.info(f"epoch {epoch}: latest stats{validation_stats}")
+
+
+        # if args.push_to_hub and epoch < args.num_train_epochs - 1:
+        #     accelerator.wait_for_everyone()
+        #     unwrapped_model = accelerator.unwrap_model(model)
+        #     unwrapped_model.save_pretrained(
+        #         args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+        #     )
+        #     if accelerator.is_main_process:
+        #         tokenizer.save_pretrained(args.output_dir)
+        #         repo.push_to_hub(
+        #             commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+        #         )
+
+        # if args.checkpointing_steps == "epoch":
+        #     output_dir = f"epoch_{epoch}"
+        #     if args.output_dir is not None:
+        #         output_dir = os.path.join(args.output_dir, output_dir)
+        #     accelerator.save_state(output_dir)
 
         ### Early stoppings
-        eval_metrics['eval_loss'] = torch.mean(accelerator.gather_for_metrics(eval_loss)).item() / len(eval_dataloader)
-        metrics_ready_to_stop = [es.check_early_stopping(eval_metrics[es.metric_name],epoch,completed_steps) for es in early_stoppings]
+        metrics_ready_to_stop = [es.check_early_stopping(validation_stats[es.metric_name],epoch,completed_steps) for es in early_stoppings]
 
-        if all(metrics_ready_to_stop):
-            accelerator.set_trigger()
-            logger.info(f"Stopping early after epoch {epoch}.")
-            for es in early_stoppings:
-                logger.info(
-                    'Achieved best value ({}) for metric {} at the end of epoch {}'.format(
-                        es.best_value,
-                        es.metric_name,
-                        es.best_epoch
-                    )
-                )
-        # update best values
-        if args.with_tracking:
-            for es in early_stoppings:
-                if es.improved_metric and accelerator.is_main_process:
-                    wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
-                    wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
-                    wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
-
-        ### Stop model if neccessary
-        if accelerator.check_trigger():
-            break
+        
         
     if args.with_tracking:
         accelerator.end_training()
 
-    if args.output_dir is not None:
-        accelerator.wait_for_everyone()
-        # unwrapped_model = accelerator.unwrap_model(model)
-        # unwrapped_model.save_pretrained(
-        #     args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-        # )
-        if accelerator.is_main_process:
-            # tokenizer.save_pretrained(args.output_dir) 
-            if args.push_to_hub:
-                repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
+    # if args.output_dir is not None:
+    #     accelerator.wait_for_everyone()
+    #     # unwrapped_model = accelerator.unwrap_model(model)
+    #     # unwrapped_model.save_pretrained(
+    #     #     args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+    #     # )
+    #     if accelerator.is_main_process:
+    #         # tokenizer.save_pretrained(args.output_dir) 
+    #         if args.push_to_hub:
+    #             repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
 
     if args.task_name == "mnli":
         # Final evaluation on mismatched validation set
@@ -1179,12 +1241,12 @@ def main():
         eval_metric = metric.compute()
         logger.info(f"mnli-mm: {eval_metric}")
 
-    if args.output_dir is not None:
-        summaries = {f'best_{es.metric_name}' : es.best_value for es in early_stoppings}
-        with open(os.path.join(args.output_dir, "run_overview.json"), "w") as f:   
-            argument_dict = experiment_config
-            argument_dict.update(summaries)
-            json.dump(argument_dict,f)
+    # if args.output_dir is not None:
+    #     summaries = {f'best_{es.metric_name}' : es.best_value for es in early_stoppings}
+    #     with open(os.path.join(args.output_dir, "run_overview.json"), "w") as f:   
+    #         argument_dict = experiment_config
+    #         argument_dict.update(summaries)
+    #         json.dump(argument_dict,f)
 
 if __name__ == "__main__":
     main()
