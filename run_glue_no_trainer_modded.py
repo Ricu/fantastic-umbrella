@@ -1027,28 +1027,26 @@ def main():
             active_dataloader = train_dataloader
        
         for step, batch in enumerate(active_dataloader):
-            with record_function("stage1"):
-                if use_modded:
-                    stage1_pass(
-                            accelerator=accelerator,
-                            model=model,
-                            optimizer=optimizer,
-                            batch=batch,
-                            hooks=hooks,
-                            dropout_modules=dropout_modules,
-                            catch_dropouts=catch_dropouts,
-                            insert_dropouts=insert_dropouts,
-                            modules_require_grad=modules_require_grad
-                    )
-            with record_function("stage2"):
-                train_stats = stage2_pass(
-                    accelerator=accelerator,
-                    model=model,
-                    optimizer=optimizer,
-                    batch=batch,
-                    softmax_fn=softmax,
-                    gradient_accumulation_steps=args.gradient_accumulation_steps,
+            if use_modded:
+                stage1_pass(
+                        accelerator=accelerator,
+                        model=model,
+                        optimizer=optimizer,
+                        batch=batch,
+                        hooks=hooks,
+                        dropout_modules=dropout_modules,
+                        catch_dropouts=catch_dropouts,
+                        insert_dropouts=insert_dropouts,
+                        modules_require_grad=modules_require_grad
                 )
+            train_stats = stage2_pass(
+                accelerator=accelerator,
+                model=model,
+                optimizer=optimizer,
+                batch=batch,
+                softmax_fn=softmax,
+                gradient_accumulation_steps=args.gradient_accumulation_steps,
+            )
 
             train_stats_helper.add_stats(train_stats)
 
