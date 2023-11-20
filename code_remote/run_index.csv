@@ -167,3 +167,7 @@ id,task_name,model_name_or_path,per_device_train_batch_size,per_device_eval_batc
 165,rte,bert-base-uncased,32,32,0.01,linear,0.1,all,0.1,,1,0.9,0.999,5,0,0,3,4e-05,13_bert_base_paper
 166,rte,bert-base-uncased,32,32,0.01,linear,0.1,all,0.1,,1,0.9,0.999,5,0,0,3,3e-05,13_bert_base_paper
 167,rte,bert-base-uncased,32,32,0.01,linear,0.1,all,0.1,,1,0.9,0.999,5,0,0,3,2e-05,13_bert_base_paper
+168,qnli,bert-base-uncased,32,32,0.01,linear,0.1,all,0.1,,1,0.9,0.999,5,0,0,3,5e-05,13_bert_base_paper
+169,qnli,bert-base-uncased,32,32,0.01,linear,0.1,all,0.1,,1,0.9,0.999,5,0,0,3,4e-05,13_bert_base_paper
+170,qnli,bert-base-uncased,32,32,0.01,linear,0.1,all,0.1,,1,0.9,0.999,5,0,0,3,3e-05,13_bert_base_paper
+171,qnli,bert-base-uncased,32,32,0.01,linear,0.1,all,0.1,,1,0.9,0.999,5,0,0,3,2e-05,13_bert_base_paper
