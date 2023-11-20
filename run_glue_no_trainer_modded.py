@@ -1026,116 +1026,96 @@ def main():
         else:
             active_dataloader = train_dataloader
        
-        def trace_handler(p):
-            p.export_chrome_trace("/home/lange/fantastic-umbrella/tmp/trace_" + str(p.step_num) + ".json")
-
-        with profile(
-            activities=[ProfilerActivity.CPU,ProfilerActivity.CUDA],
-            record_shapes=True,
-            profile_memory=True,
-            schedule=schedule(
-                # skip_first=10,
-                wait=0,
-                warmup=0,
-                active=1,
-                repeat=1
-            ),
-            # on_trace_ready=trace_handler
-        ) as p:
-            for step, batch in enumerate(active_dataloader):
-                with record_function("stage1"):
-                    if use_modded:
-                        stage1_pass(
-                                accelerator=accelerator,
-                                model=model,
-                                optimizer=optimizer,
-                                batch=batch,
-                                hooks=hooks,
-                                dropout_modules=dropout_modules,
-                                catch_dropouts=catch_dropouts,
-                                insert_dropouts=insert_dropouts,
-                                modules_require_grad=modules_require_grad
-                        )
-                with record_function("stage2"):
-                    train_stats = stage2_pass(
-                        accelerator=accelerator,
-                        model=model,
-                        optimizer=optimizer,
-                        batch=batch,
-                        softmax_fn=softmax,
-                        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        for step, batch in enumerate(active_dataloader):
+            with record_function("stage1"):
+                if use_modded:
+                    stage1_pass(
+                            accelerator=accelerator,
+                            model=model,
+                            optimizer=optimizer,
+                            batch=batch,
+                            hooks=hooks,
+                            dropout_modules=dropout_modules,
+                            catch_dropouts=catch_dropouts,
+                            insert_dropouts=insert_dropouts,
+                            modules_require_grad=modules_require_grad
                     )
+            with record_function("stage2"):
+                train_stats = stage2_pass(
+                    accelerator=accelerator,
+                    model=model,
+                    optimizer=optimizer,
+                    batch=batch,
+                    softmax_fn=softmax,
+                    gradient_accumulation_steps=args.gradient_accumulation_steps,
+                )
 
-                train_stats_helper.add_stats(train_stats)
+            train_stats_helper.add_stats(train_stats)
 
-                if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad()
-                    progress_bar.update(1)
-                    completed_steps += 1
-                    p.step()    
+            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                progress_bar.update(1)
+                completed_steps += 1
 
+            if args.with_tracking:
+                accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
+
+            # if isinstance(checkpointing_steps, int):
+            #     if completed_steps % checkpointing_steps == 0:
+            #         output_dir = f"step_{completed_steps }"
+            #         if args.output_dir is not None:
+            #             output_dir = os.path.join(args.output_dir, output_dir)
+            #         accelerator.save_state(output_dir)
+
+
+            # Evaluation, tracking and early stopping in given interval
+            if completed_steps % args.evaluation_steps == 0:
+                validation_stats = evaluate_model(
+                    model=model,
+                    eval_dataloader=eval_dataloader,
+                    accelerator=accelerator,
+                    metric=metric,
+                    softmax_fn=softmax,
+                    is_regression=is_regression,
+                )
+                computed_training_stats = train_stats_helper.compute_stats()
+                train_stats_helper.initialize_stats()
                 if args.with_tracking:
-                    accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
-
-                # if isinstance(checkpointing_steps, int):
-                #     if completed_steps % checkpointing_steps == 0:
-                #         output_dir = f"step_{completed_steps }"
-                #         if args.output_dir is not None:
-                #             output_dir = os.path.join(args.output_dir, output_dir)
-                #         accelerator.save_state(output_dir)
-
-
-                # Evaluation, tracking and early stopping in given interval
-                if completed_steps % args.evaluation_steps == 0:
-                    validation_stats = evaluate_model(
-                        model=model,
-                        eval_dataloader=eval_dataloader,
-                        accelerator=accelerator,
-                        metric=metric,
-                        softmax_fn=softmax,
-                        is_regression=is_regression,
+                    accelerator.log(
+                        {"epoch" : epoch} | validation_stats | computed_training_stats,
+                        step=completed_steps,
                     )
-                    computed_training_stats = train_stats_helper.compute_stats()
-                    train_stats_helper.initialize_stats()
-                    if args.with_tracking:
-                        accelerator.log(
-                            {"epoch" : epoch} | validation_stats | computed_training_stats,
-                            step=completed_steps,
-                        )
-                
-                    metrics_ready_to_stop = [es.check_early_stopping(validation_stats[es.metric_name],epoch,completed_steps) for es in early_stoppings]
-                    if all(metrics_ready_to_stop):
-                        accelerator.set_trigger()
-                        logger.info(f"Stopping early after epoch {epoch}.")
-                        for es in early_stoppings:
-                            logger.info(
-                                'Achieved best value ({}) for metric {} at in epoch {}'.format(
-                                    es.best_value,
-                                    es.metric_name,
-                                    es.best_epoch
-                                )
+            
+                metrics_ready_to_stop = [es.check_early_stopping(validation_stats[es.metric_name],epoch,completed_steps) for es in early_stoppings]
+                if all(metrics_ready_to_stop):
+                    accelerator.set_trigger()
+                    logger.info(f"Stopping early after epoch {epoch}.")
+                    for es in early_stoppings:
+                        logger.info(
+                            'Achieved best value ({}) for metric {} at in epoch {}'.format(
+                                es.best_value,
+                                es.metric_name,
+                                es.best_epoch
                             )
-                    # update best values
-                    if args.with_tracking:
-                        for es in early_stoppings:
-                            if es.improved_metric and accelerator.is_main_process:
-                                wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
-                                wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
-                                wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
+                        )
+                # update best values
+                if args.with_tracking:
+                    for es in early_stoppings:
+                        if es.improved_metric and accelerator.is_main_process:
+                            wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
+                            wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
+                            wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
 
-                    ### Stop model if neccessary
-                    if accelerator.check_trigger():
-                        break
-
-                if completed_steps >= args.max_train_steps:
+                ### Stop model if neccessary
+                if accelerator.check_trigger():
                     break
 
-        
-        # epoch end
-        # prof.export_chrome_trace("trace.json")
+            if completed_steps >= args.max_train_steps:
+                break
 
+        
         # Do additional evaluation if final epoch and have some remaining steps
         if (epoch == args.num_train_epochs-1) and (remaining_steps := completed_steps%args.evaluation_steps != 0):
             # collect validation results
