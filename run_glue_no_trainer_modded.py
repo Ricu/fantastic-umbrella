@@ -449,6 +449,7 @@ def stage1_pass(
         dropout_modules,
         catch_dropouts,
         insert_dropouts,
+        softmax_fn,
         modules_require_grad
 ):
     model.train()
@@ -485,6 +486,11 @@ def stage1_pass(
 
         # re-enable gradient insertion for insertion run
         hooks['insert_hook'].enable_insertion()
+    train_stats = {
+        "train_st1_loss" : loss.detach().float(),
+        "train_st1_p_max" : softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean()
+    }
+    return train_stats
 
 def stage2_pass(
         accelerator,
@@ -500,9 +506,8 @@ def stage2_pass(
     loss = outputs.loss
     # We keep track of the loss at each epoch
     train_stats = {
-        "train_loss" : loss.detach().float(),
-        "train_p_max" : softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean(),
-        "train_p_var" : softmax_fn(outputs.logits.detach()).var(dim=1).mean()
+        "train_st2_loss" : loss.detach().float(),
+        "train_st2_p_max" : softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean(),
     }
 
     loss = loss / gradient_accumulation_steps
@@ -819,7 +824,6 @@ def main():
 
         pre_eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
         logger.info(f'Original number of validation samples is: {len(pre_eval_dataset)} with {sum(pre_eval_dataset["labels"])/len(pre_eval_dataset["labels"])} of the data in class 1')
-        
         target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
         train_indices, validation_indices, _, _ = train_test_split(
             range(len(pre_train_dataset)), # dummy indices
@@ -1055,8 +1059,9 @@ def main():
             active_dataloader = train_dataloader
        
         for step, batch in enumerate(active_dataloader):
+            train_stats = {}
             if use_modded:
-                stage1_pass(
+                train_stats.update(stage1_pass(
                         accelerator=accelerator,
                         model=model,
                         optimizer=optimizer,
@@ -1066,15 +1071,15 @@ def main():
                         catch_dropouts=catch_dropouts,
                         insert_dropouts=insert_dropouts,
                         modules_require_grad=modules_require_grad
-                )
-            train_stats = stage2_pass(
+                ))
+            train_stats.update(stage2_pass(
                 accelerator=accelerator,
                 model=model,
                 optimizer=optimizer,
                 batch=batch,
                 softmax_fn=softmax,
                 gradient_accumulation_steps=args.gradient_accumulation_steps,
-            )
+            ))
 
             train_stats_helper.add_stats(train_stats)
 
