@@ -834,12 +834,15 @@ def main():
         # even though the benefits of having more validation samples is relatively limited. Therefore, cap the number of
         # validation samples to be 4 times the original number of validation samples. Simply drop the rest.
         maximum_number_validation_samples = 4 * len(pre_eval_dataset)
+        import numpy as np
+        
+        label_subset = list(np.array(pre_train_dataset["labels"])[validation_indices])
         if len(validation_indices) > maximum_number_validation_samples:
             # create another stratified subset of the validation indices
             reduced_validation_indices, _, _, _ = train_test_split(
                 validation_indices, # take subset of previous validation indices
-                [pre_train_dataset["labels"][index] for index in validation_indices], #
-                stratify = [pre_train_dataset["labels"][index] for index in validation_indices],
+                label_subset, #
+                stratify = label_subset,
                 train_size = maximum_number_validation_samples,
                 random_state = args.seed
             )
