@@ -1070,6 +1070,7 @@ def main():
                         dropout_modules=dropout_modules,
                         catch_dropouts=catch_dropouts,
                         insert_dropouts=insert_dropouts,
+                        softmax_fn=softmax,
                         modules_require_grad=modules_require_grad
                 ))
             train_stats.update(stage2_pass(
@@ -1135,10 +1136,11 @@ def main():
                             wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
                             wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
                             wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
-
-                ### Stop model if neccessary
-                if accelerator.check_trigger():
-                    break
+            
+            ### Stop model if neccessary
+            if accelerator.check_trigger():
+                accelerator.set_trigger()
+                break
 
             if completed_steps >= args.max_train_steps:
                 break
@@ -1176,6 +1178,9 @@ def main():
                         wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
 
         logger.info(f"epoch {epoch}: latest stats{validation_stats}")
+        ### Stop model if neccessary
+        if accelerator.check_trigger():
+            break
 
     if args.with_tracking:
         accelerator.end_training()
