@@ -35,6 +35,7 @@ from torch.utils.data import DataLoader, Subset, ConcatDataset
 from tqdm.auto import tqdm
 
 from sklearn.model_selection import train_test_split
+from datetime import datetime
 
 import transformers
 from transformers import (
@@ -967,7 +968,10 @@ def main():
     if args.with_tracking:
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-        run_name = "/".join(args.output_dir.split("/")[-2:])
+        if args.output_dir is not None:
+            run_name = "/".join(args.output_dir.split("/")[-2:])
+        else:
+            run_name = "run_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         accelerator.init_trackers(project_name="fantastic-umbrella",
                                   config=experiment_config,
                                   init_kwargs={"wandb": {"entity": "Ricu",
