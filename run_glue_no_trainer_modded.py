@@ -1080,14 +1080,6 @@ def main():
             if args.with_tracking:
                 accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
 
-            # if isinstance(checkpointing_steps, int):
-            #     if completed_steps % checkpointing_steps == 0:
-            #         output_dir = f"step_{completed_steps }"
-            #         if args.output_dir is not None:
-            #             output_dir = os.path.join(args.output_dir, output_dir)
-            #         accelerator.save_state(output_dir)
-
-
             # Evaluation, tracking and early stopping in given interval
             if completed_steps % args.evaluation_steps == 0:
                 validation_stats = evaluate_model(
@@ -1172,43 +1164,8 @@ def main():
 
         logger.info(f"epoch {epoch}: latest stats{validation_stats}")
 
-
-        # if args.push_to_hub and epoch < args.num_train_epochs - 1:
-        #     accelerator.wait_for_everyone()
-        #     unwrapped_model = accelerator.unwrap_model(model)
-        #     unwrapped_model.save_pretrained(
-        #         args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-        #     )
-        #     if accelerator.is_main_process:
-        #         tokenizer.save_pretrained(args.output_dir)
-        #         repo.push_to_hub(
-        #             commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
-        #         )
-
-        # if args.checkpointing_steps == "epoch":
-        #     output_dir = f"epoch_{epoch}"
-        #     if args.output_dir is not None:
-        #         output_dir = os.path.join(args.output_dir, output_dir)
-        #     accelerator.save_state(output_dir)
-
-        ### Early stoppings
-        metrics_ready_to_stop = [es.check_early_stopping(validation_stats[es.metric_name],epoch,completed_steps) for es in early_stoppings]
-
-        
-        
     if args.with_tracking:
         accelerator.end_training()
-
-    # if args.output_dir is not None:
-    #     accelerator.wait_for_everyone()
-    #     # unwrapped_model = accelerator.unwrap_model(model)
-    #     # unwrapped_model.save_pretrained(
-    #     #     args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-    #     # )
-    #     if accelerator.is_main_process:
-    #         # tokenizer.save_pretrained(args.output_dir) 
-    #         if args.push_to_hub:
-    #             repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
 
     if args.task_name == "mnli":
         # Final evaluation on mismatched validation set
@@ -1229,13 +1186,6 @@ def main():
 
         eval_metric = metric.compute()
         logger.info(f"mnli-mm: {eval_metric}")
-
-    # if args.output_dir is not None:
-    #     summaries = {f'best_{es.metric_name}' : es.best_value for es in early_stoppings}
-    #     with open(os.path.join(args.output_dir, "run_overview.json"), "w") as f:   
-    #         argument_dict = experiment_config
-    #         argument_dict.update(summaries)
-    #         json.dump(argument_dict,f)
 
 if __name__ == "__main__":
     main()
