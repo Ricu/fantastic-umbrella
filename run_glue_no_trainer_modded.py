@@ -1096,6 +1096,7 @@ def main():
 
             # Evaluation, tracking and early stopping in given interval
             if completed_steps % args.evaluation_steps == 0:
+                logger.info(f"epoch {epoch}: evaluating model...")
                 validation_stats = evaluate_model(
                     model=model,
                     eval_dataloader=eval_dataloader,
@@ -1104,6 +1105,7 @@ def main():
                     softmax_fn=softmax,
                     is_regression=is_regression,
                 )
+                logger.info(f"evaluation complete, results: {validation_stats}")
                 computed_training_stats = train_stats_helper.compute_stats()
                 train_stats_helper.initialize_stats()
 
@@ -1177,7 +1179,6 @@ def main():
                         wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
                         wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
 
-        logger.info(f"epoch {epoch}: latest stats{validation_stats}")
         ### Stop model if neccessary
         if accelerator.check_trigger():
             break
