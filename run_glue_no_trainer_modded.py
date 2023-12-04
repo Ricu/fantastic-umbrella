@@ -1121,7 +1121,7 @@ def main():
                     validation_stats_mm = {f'{k}_mm' : v for k,v in validation_stats_mm.items()}
                     validation_stats.update(validation_stats_mm)
                     
-                logger.info(f"evaluation complete, results: ,{validation_stats}")
+                logger.info(f"evaluation complete, results: {validation_stats}")
                 computed_training_stats = train_stats_helper.compute_stats()
                 train_stats_helper.initialize_stats()
 
