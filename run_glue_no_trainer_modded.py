@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import random
+import numpy as np
 from pathlib import Path
 
 import datasets
@@ -818,69 +819,63 @@ def main():
         )
 
     ########### Modify datasets #############
-    if args.training_size != 1.0:
-        pre_train_dataset = processed_datasets["train"]
-        logger.info(f'Original number of training samples is: {len(pre_train_dataset)} with {sum(pre_train_dataset["labels"])/len(pre_train_dataset["labels"])} of the data in class 1')
+    train_dataset = processed_datasets["train"]
+    logger.info(f'Number of training samples is: {len(train_dataset)} with {sum(train_dataset["labels"])/len(train_dataset["labels"])} of the data in class 1')
 
-        pre_eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-        logger.info(f'Original number of validation samples is: {len(pre_eval_dataset)} with {sum(pre_eval_dataset["labels"])/len(pre_eval_dataset["labels"])} of the data in class 1')
+    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+    logger.info(f'Number of validation samples is: {len(eval_dataset)} with {sum(eval_dataset["labels"])/len(eval_dataset["labels"])} of the data in class 1')
+    
+    if args.training_size != 1.0:
         target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
         train_indices, validation_indices, _, _ = train_test_split(
-            range(len(pre_train_dataset)), # dummy indices
-            pre_train_dataset["labels"], #
-            stratify = pre_train_dataset["labels"],
+            range(len(train_dataset)), # dummy indices
+            train_dataset["labels"], #
+            stratify = train_dataset["labels"],
             train_size = target_train_size,
             random_state = args.seed
         )
 
+        ## Validation set
         # if training sizes are really small compared to the total number of samples (e.g. only 32 samples or 0.01 fraction),
         # there would be relatively many validation samples being added. This could lead to one huge evaluation loop for
         # an update only consisting 32 samples. This would incur a dramatic increase in evaluation and therefore training time,
         # even though the benefits of having more validation samples is relatively limited. Therefore, cap the number of
         # validation samples to be 4 times the original number of validation samples. Simply drop the rest.
-        maximum_number_validation_samples = 4 * len(pre_eval_dataset)
-        import numpy as np
+        # maximum_number_validation_samples = 4 * len(pre_eval_dataset)
+        MAXIMUM_NUMBER_VALIDATION_SAMPLES = 5000
+        n_remaining_validation_samples_capacity = max(0,MAXIMUM_NUMBER_VALIDATION_SAMPLES-len(eval_dataset))
+        n_validation_samples_to_be_added = min(len(validation_indices),n_remaining_validation_samples_capacity)
+
         
-        label_subset = list(np.array(pre_train_dataset["labels"])[validation_indices])
-        if len(validation_indices) > maximum_number_validation_samples:
+        if n_validation_samples_to_be_added > 0:
+            label_subset = list(np.array(train_dataset["labels"])[validation_indices])
             # create another stratified subset of the validation indices
             reduced_validation_indices, _, _, _ = train_test_split(
                 validation_indices, # take subset of previous validation indices
                 label_subset, #
                 stratify = label_subset,
-                train_size = maximum_number_validation_samples,
+                train_size = n_validation_samples_to_be_added,
                 random_state = args.seed
             )
-        else:
-            reduced_validation_indices = validation_indices
-
-        train_dataset = Subset(pre_train_dataset,train_indices)
-        logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
-
-        eval_dataset = pre_eval_dataset
-        # eval_dataset = ConcatDataset([pre_eval_dataset,Subset(pre_train_dataset,reduced_validation_indices)])
-        # logger.info(f'Adding {len(reduced_validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
+            eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,reduced_validation_indices)])
+            logger.info(f'Adding {len(reduced_validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
         
-        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
-        if len(train_indices) < total_batch_size:
+        ## Train dataset
+        train_dataset = Subset(train_dataset,train_indices)
+        logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
+        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+        if len(train_indices) < total_batch_size: # too few training samples to fill a batch
             logger.info(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
             missing_factor = int(total_batch_size/len(train_indices))
             train_dataset = ConcatDataset([train_dataset]*missing_factor)
-
             logger.info(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
-    else:
-        train_dataset = processed_datasets["train"]
-        logger.info(f'Number of training samples is: {len(train_dataset)} with {sum(train_dataset["labels"])/len(train_dataset["labels"])} of the data in class 1')
-   
-        eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-        logger.info(f'Number of validation samples is: {len(eval_dataset)} with {sum(eval_dataset["labels"])/len(eval_dataset["labels"])} of the data in class 1')
+    
+
+    if args.task_name == "mnli":
+        eval_dataset_mismatched = processed_datasets["validation_mismatched"]
     ########### \Modify datasets #############
 
-
-    # Log a few random samples from the training set:
-    # for index in random.sample(range(len(train_dataset)), 3):
-    #     logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
     # DataLoaders creation:
     if args.pad_to_max_length:
@@ -898,6 +893,8 @@ def main():
         pin_memory=True
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+    if args.task_name == "mnli":
+        eval_dataloader_mismatched = DataLoader(eval_dataset_mismatched, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -935,10 +932,16 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
-    )
-
+    
+    if args.task_name == 'mnli':
+        model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, lr_scheduler
+        )
+    else:
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+        )
+        
     # Prepare the fumbrella method
     use_modded = not (args.catch_dropout is None)
     if use_modded:
@@ -1105,7 +1108,20 @@ def main():
                     softmax_fn=softmax,
                     is_regression=is_regression,
                 )
-                logger.info(f"evaluation complete, results: {validation_stats}")
+
+                if args.task_name == 'mnli':
+                    validation_stats_mm = evaluate_model(
+                        model=model,
+                        eval_dataloader=eval_dataloader_mismatched,
+                        accelerator=accelerator,
+                        metric=metric,
+                        softmax_fn=softmax,
+                        is_regression=is_regression,
+                    )
+                    validation_stats_mm = {f'{k}_mm' : v for k,v in validation_stats_mm.items()}
+                    validation_stats.update(validation_stats_mm)
+                    
+                logger.info(f"evaluation complete, results: ,{validation_stats}")
                 computed_training_stats = train_stats_helper.compute_stats()
                 train_stats_helper.initialize_stats()
 
@@ -1159,6 +1175,19 @@ def main():
                 softmax_fn=softmax,
                 is_regression=is_regression,
             )
+
+            if args.task_name == 'mnli':
+                validation_stats_mm = evaluate_model(
+                    model=model,
+                    eval_dataloader=eval_dataloader_mismatched,
+                    accelerator=accelerator,
+                    metric=metric,
+                    softmax_fn=softmax,
+                    is_regression=is_regression,
+                )
+                validation_stats_mm = {f'{k}_mm' : v for k,v in validation_stats_mm.items()}
+                validation_stats.update(validation_stats_mm)
+
             # collect training results
             computed_training_stats = train_stats_helper.compute_stats(avg_factor=remaining_steps)
 
