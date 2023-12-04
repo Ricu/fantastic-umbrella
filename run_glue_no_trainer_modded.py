@@ -944,6 +944,11 @@ def main():
         
     # Prepare the fumbrella method
     use_modded = not (args.catch_dropout is None)
+    # use_modded = True
+    # if args.catch_dropout is None:
+    #     args.catch_dropout = 0
+
+
     if use_modded:
         hooks, dropout_modules, catch_dropouts, insert_dropouts = prepare_fumbrella(
             model=model,
