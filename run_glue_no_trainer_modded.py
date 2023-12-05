@@ -316,6 +316,7 @@ class Insert_Hook():
         self.batch_size = batch_size
 
     def hook_fn(self, module, grad_output):
+
         if self.insertion_enabled:
             grad_diff = grad_output[0] - self.new_grad_output[0]
             grad_diff_rescaled = grad_diff *self.batch_size
@@ -463,11 +464,14 @@ def stage1_pass(
         for module, p in zip(dropout_modules,catch_dropouts):
             module.p = p
         
-        # freeze all layers except for the last
-        for named_param in model.named_parameters():
-            if 'classifier' not in named_param[0]:
-                named_param[1].requires_grad = False
+        # # freeze all layers except for the last
+        # for named_param in model.named_parameters():
+        #     if 'classifier' not in named_param[0]:
+        #         named_param[1].requires_grad = False
         
+        # unfreeze all layers as they have been before
+        for named_param in model.named_parameters():
+            named_param[1].requires_grad = modules_require_grad[named_param[0]]
 
         optimizer.zero_grad()
         outputs = model(**batch)
@@ -481,9 +485,7 @@ def stage1_pass(
         for module, p in zip(dropout_modules,insert_dropouts):
             module.p = p
         
-        # unfreeze all layers as they have been before
-        for named_param in model.named_parameters():
-            named_param[1].requires_grad = modules_require_grad[named_param[0]]
+        
 
         # re-enable gradient insertion for insertion run
         hooks['insert_hook'].enable_insertion()
@@ -499,8 +501,14 @@ def stage2_pass(
         optimizer,
         batch,
         softmax_fn,
-        gradient_accumulation_steps
+        gradient_accumulation_steps,
+        modules_require_grad
     ):
+
+    # unfreeze all layers as they have been before
+    for named_param in model.named_parameters():
+        named_param[1].requires_grad = modules_require_grad[named_param[0]]
+
     model.train()  
     optimizer.zero_grad()
     outputs = model(**batch)
@@ -704,6 +712,7 @@ def main():
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=num_labels, finetuning_task=args.task_name)
+    # config = AutoConfig.from_pretrained("bert-base-uncased", num_labels=num_labels, finetuning_task=args.task_name)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path,
@@ -817,7 +826,6 @@ def main():
             remove_columns=raw_datasets["train"].column_names,
             desc="Running tokenizer on dataset",
         )
-
     ########### Modify datasets #############
     train_dataset = processed_datasets["train"]
     logger.info(f'Number of training samples is: {len(train_dataset)} with {sum(train_dataset["labels"])/len(train_dataset["labels"])} of the data in class 1')
@@ -847,18 +855,21 @@ def main():
         n_validation_samples_to_be_added = min(len(validation_indices),n_remaining_validation_samples_capacity)
 
         
+
         if n_validation_samples_to_be_added > 0:
-            label_subset = list(np.array(train_dataset["labels"])[validation_indices])
-            # create another stratified subset of the validation indices
-            reduced_validation_indices, _, _, _ = train_test_split(
-                validation_indices, # take subset of previous validation indices
-                label_subset, #
-                stratify = label_subset,
-                train_size = n_validation_samples_to_be_added,
-                random_state = args.seed
-            )
-            eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,reduced_validation_indices)])
-            logger.info(f'Adding {len(reduced_validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
+            if n_validation_samples_to_be_added != len(validation_indices):
+                label_subset = list(np.array(train_dataset["labels"])[validation_indices])
+                # create another stratified subset of the validation indices
+                validation_indices, _, _, _ = train_test_split(
+                    validation_indices, # take subset of previous validation indices
+                    label_subset, #
+                    stratify = label_subset,
+                    train_size = n_validation_samples_to_be_added,
+                    random_state = args.seed
+                )
+            
+            eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,validation_indices)])
+            logger.info(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
         
 
         ## Train dataset
@@ -950,17 +961,25 @@ def main():
 
 
     if use_modded:
+        layer_to_attach_to = model.dropout
+        # layer_to_attach_to = model.classifier
         hooks, dropout_modules, catch_dropouts, insert_dropouts = prepare_fumbrella(
             model=model,
-            layer=model.classifier,
+            layer=layer_to_attach_to,
             batch_size=args.per_device_train_batch_size,
             catch_dropout=args.catch_dropout,
             insert_dropout=args.insert_dropout,
             original_gradient_fraction=args.original_gradient_fraction
         )
-        modules_require_grad = {
-            named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
+        modules_require_grad_stage1 = {
+            named_param[0] : False for named_param in model.named_parameters()
         }
+        modules_require_grad_stage1["classifier.weight"] = True
+        modules_require_grad_stage1["classifier.bias"] = True
+        modules_require_grad_stage1["bert.pooler.dense.bias"] = True
+        modules_require_grad_stage2 = {
+            named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
+        }   
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1079,7 +1098,7 @@ def main():
                         catch_dropouts=catch_dropouts,
                         insert_dropouts=insert_dropouts,
                         softmax_fn=softmax,
-                        modules_require_grad=modules_require_grad
+                        modules_require_grad=modules_require_grad_stage1
                 ))
             train_stats.update(stage2_pass(
                 accelerator=accelerator,
@@ -1088,6 +1107,7 @@ def main():
                 batch=batch,
                 softmax_fn=softmax,
                 gradient_accumulation_steps=args.gradient_accumulation_steps,
+                modules_require_grad=modules_require_grad_stage2
             ))
 
             train_stats_helper.add_stats(train_stats)
@@ -1219,6 +1239,16 @@ def main():
 
     if args.with_tracking:
         accelerator.end_training()
+
+    # if args.output_dir is not None:
+    #     accelerator.wait_for_everyone()
+    #     unwrapped_model = accelerator.unwrap_model(model)
+    #     unwrapped_model.save_pretrained(
+    #         args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+    #     )
+    #     if accelerator.is_main_process:
+    #         tokenizer.save_pretrained(args.output_dir) 
+
 
     if args.task_name == "mnli":
         # Final evaluation on mismatched validation set
