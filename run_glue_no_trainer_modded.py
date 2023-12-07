@@ -977,9 +977,9 @@ def main():
         modules_require_grad_stage1["classifier.weight"] = True
         modules_require_grad_stage1["classifier.bias"] = True
         modules_require_grad_stage1["bert.pooler.dense.bias"] = True
-        modules_require_grad_stage2 = {
-            named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
-        }   
+    modules_require_grad_stage2 = {
+        named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
+    }   
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
