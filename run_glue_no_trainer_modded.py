@@ -961,8 +961,8 @@ def main():
 
 
     if use_modded:
-        layer_to_attach_to = model.dropout
-        # layer_to_attach_to = model.classifier
+        # layer_to_attach_to = model.dropout
+        layer_to_attach_to = model.classifier
         hooks, dropout_modules, catch_dropouts, insert_dropouts = prepare_fumbrella(
             model=model,
             layer=layer_to_attach_to,
@@ -976,7 +976,7 @@ def main():
         }
         modules_require_grad_stage1["classifier.weight"] = True
         modules_require_grad_stage1["classifier.bias"] = True
-        modules_require_grad_stage1["bert.pooler.dense.bias"] = True
+        # modules_require_grad_stage1["bert.pooler.dense.bias"] = True
     modules_require_grad_stage2 = {
         named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
     }   
