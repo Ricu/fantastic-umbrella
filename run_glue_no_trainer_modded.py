@@ -421,7 +421,7 @@ def prepare_fumbrella(
         'insert_hook' : Insert_Hook(layer,original_gradient_fraction, batch_size=batch_size)
     }
     # determine dropout_layers which will be activated later (skip input dropout)
-    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)][1:]
+    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)]
     
     # set the dropout values for the catch run
     if 0 <= catch_dropout <= 1:
@@ -431,9 +431,9 @@ def prepare_fumbrella(
         
     # set the dropout values for the insertion run
     if  0 <= insert_dropout <= 1:
-        insert_dropouts = [insert_dropout for _ in dropout_modules]
+        insert_dropouts = [insert_dropout for _ in dropout_modules[1:]]
     else: 
-        insert_dropouts = [module.p for module in dropout_modules]
+        insert_dropouts = [module.p for module in dropout_modules[1:]]
 
     # initialize the dropout to the desired value. If no insertion is done, this dropout values
     # will be used as the standard dropout value.
