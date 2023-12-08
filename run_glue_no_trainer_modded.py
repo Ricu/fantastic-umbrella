@@ -55,8 +55,8 @@ from transformers.utils.versions import require_version
 from dotenv import load_dotenv
 import os
 
-load_dotenv("./.env")
-WANDB_API_KEY = os.getenv("WANDB_API_KEY")
+# load_dotenv("./.env")
+# WANDB_API_KEY = os.getenv("WANDB_API_KEY")
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.31.0.dev0")
@@ -1006,7 +1006,9 @@ def main():
         accelerator.init_trackers(project_name="fantastic-umbrella",
                                   config=experiment_config,
                                   init_kwargs={"wandb": {"entity": "Ricu",
-                                                         "name": run_name},
+                                                         "name": run_name,
+                                                         "tags" : json.loads(os.getenv("WANBD_TAGS"))
+                                                         },
                                                })
         if accelerator.is_main_process:
             wandb_tracker = accelerator.get_tracker("wandb").tracker
