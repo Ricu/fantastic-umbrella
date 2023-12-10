@@ -243,3 +243,4 @@ id,task_name,model_name_or_path,per_device_train_batch_size,per_device_eval_batc
 288,qnli,bert-large-uncased,32,128,0.01,linear,0.1,all,0.1,,1,0.9,0.999,100,0,0,3,1e-05,13_bert_large_paper,,,,,
 289,qnli,bert-large-uncased,32,128,0.01,linear,0.1,all,0.1,,1,0.9,0.999,100,0,0,3,3e-05,13_bert_large_paper,,,,,
 290,qnli,bert-large-uncased,32,128,0.01,linear,0.1,all,0.1,,1,0.9,0.999,100,0,0,3,5e-05,13_bert_large_paper,,,,,
+291,qnli,bert-base-uncased,32,128,0.01,linear,0.1,all,0.1,,256,0.9,0.999,1000,0,0,500,2e-05,16_256_modded_base,,,,,
