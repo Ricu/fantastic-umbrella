@@ -251,7 +251,7 @@ def parse_args():
     parser.add_argument(
         "--original_gradient_fraction",
         type=float,
-        default=0.5,
+        default=0.0,
         help="Determines the fraction of the gradient resulting from the forward pass with dropout to be inserted."
     )
     parser.add_argument(
