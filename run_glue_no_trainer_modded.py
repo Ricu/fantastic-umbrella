@@ -431,9 +431,9 @@ def prepare_fumbrella(
         
     # set the dropout values for the insertion run
     if  0 <= insert_dropout <= 1:
-        insert_dropouts = [insert_dropout for _ in dropout_modules[1:]]
+        insert_dropouts = [insert_dropout for _ in dropout_modules]
     else: 
-        insert_dropouts = [module.p for module in dropout_modules[1:]]
+        insert_dropouts = [module.p for module in dropout_modules]
 
     # initialize the dropout to the desired value. If no insertion is done, this dropout values
     # will be used as the standard dropout value.
