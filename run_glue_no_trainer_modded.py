@@ -437,8 +437,8 @@ def prepare_fumbrella(
 
     # initialize the dropout to the desired value. If no insertion is done, this dropout values
     # will be used as the standard dropout value.
-    for module, p in zip(dropout_modules,insert_dropouts):
-        module.p = p
+    # for module, p in zip(dropout_modules,insert_dropouts):
+    #     module.p = p
     
     return hooks, dropout_modules, catch_dropouts, insert_dropouts
 
@@ -711,7 +711,13 @@ def main():
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
-    config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=num_labels, finetuning_task=args.task_name)
+    config = AutoConfig.from_pretrained(
+        args.model_name_or_path,
+        num_labels=num_labels,
+        finetuning_task=args.task_name,
+        hidden_dropout_prob = args.insert_dropout,
+        attention_probs_dropout_prob = args.insert_dropout
+        )
     # config = AutoConfig.from_pretrained("bert-base-uncased", num_labels=num_labels, finetuning_task=args.task_name)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer)
     model = AutoModelForSequenceClassification.from_pretrained(
@@ -720,7 +726,6 @@ def main():
         config=config,
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
     )
-
     softmax = torch.nn.Softmax(dim=1)
 
     
