@@ -168,6 +168,7 @@ def parse_args():
     )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument("--dataset_seed", type=int, default=None, help="A seed for reproducible datasets.")
     parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
     parser.add_argument(
         "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
@@ -613,6 +614,9 @@ def evaluate_model(
 
 def main():
     args = parse_args()
+
+    if args.dataset_seed is None:
+        args.dataset_seed = args.seed
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_glue_no_trainer", args)
@@ -838,6 +842,7 @@ def main():
     eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
     logger.info(f'Number of validation samples is: {len(eval_dataset)} with {sum(eval_dataset["labels"])/len(eval_dataset["labels"])} of the data in class 1')
     
+    
     if args.training_size != 1.0:
         target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
         train_indices, validation_indices, _, _ = train_test_split(
@@ -845,7 +850,7 @@ def main():
             train_dataset["labels"], #
             stratify = train_dataset["labels"],
             train_size = target_train_size,
-            random_state = args.seed
+            random_state = args.dataset_seed
         )
 
         ## Validation set
@@ -870,7 +875,7 @@ def main():
                     label_subset, #
                     stratify = label_subset,
                     train_size = n_validation_samples_to_be_added,
-                    random_state = args.seed
+                    random_state = args.dataset_seed
                 )
             
             eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,validation_indices)])
