@@ -1009,10 +1009,11 @@ def main():
     if args.with_tracking:
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-        if args.output_dir is not None:
-            run_name = "/".join(args.output_dir.split("/")[-2:])
-        else:
-            run_name = "run_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        if (run_name := os.getenv("WANDB_RUNNAME")) is None:
+            if args.output_dir is not None:
+                run_name = "/".join(args.output_dir.split("/")[-2:])
+            else:
+                run_name = "run_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         accelerator.init_trackers(project_name="fantastic-umbrella",
                                   config=experiment_config,
                                   init_kwargs={"wandb": {"entity": "Ricu",
