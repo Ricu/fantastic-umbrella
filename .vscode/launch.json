@@ -28,7 +28,7 @@
                 "--seed" , "0",
                 "--report_to" , "all",
                 "--insert_dropout" , "0.1",
-                // "--catch_dropout" , "0",
+                "--catch_dropout" , "0",
                 "--training_size" , "1",
                 "--beta1" , "0.9",
                 "--beta2" , "0.999",
