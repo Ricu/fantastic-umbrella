@@ -371,6 +371,147 @@ class Insert_Hook():
     def disable_insertion(self):
         self.insertion_enabled = False
 
+
+import torch
+class FumbrellaMetrics():
+    def __init__(self, batch_size):
+        self.vector_norms = []
+        self.rescaled_diffs = []
+        self.avg_diff_per_class = []
+        self.avg_diff_all_classes = []
+        self.batch_size = batch_size
+
+    def add(self, stage1_grad, stage2_grad):
+        grad_diff = stage2_grad[0] - stage1_grad[0]
+        grad_diff_rescaled = grad_diff * self.batch_size
+        self.rescaled_diffs.append(grad_diff_rescaled)
+        self.vector_norms.append(torch.linalg.vector_norm(grad_diff_rescaled,dim=1))
+        self.avg_diff_per_class.append(grad_diff_rescaled.abs().mean(dim=0))
+        self.avg_diff_all_classes.append(self.avg_diff_per_class[-1].mean())
+
+    def compute(self, accelerator):
+        diff_metrics = {}
+        vector_norms = accelerator.gather_for_metrics(self.vector_norms)
+        if isinstance(vector_norms, list):
+            vector_norms = torch.cat(vector_norms)
+        avg_grad_diffs_per_class = accelerator.gather_for_metrics(self.avg_diff_per_class)
+        if isinstance(avg_grad_diffs_per_class, list):
+            avg_grad_diffs_per_class = torch.stack(avg_grad_diffs_per_class).mean(dim=0)
+        avg_grad_diffs_all_classes = accelerator.gather_for_metrics(self.avg_diff_all_classes)
+        if isinstance(avg_grad_diffs_all_classes, list):
+            avg_grad_diffs_all_classes = torch.stack(avg_grad_diffs_all_classes).mean()
+        self.clear()
+        diff_metrics = {
+            "avg_grad_diff_all_classes" : avg_grad_diffs_all_classes,
+            "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
+            "vector_norms" : vector_norms
+        }
+        return diff_metrics
+
+    def clear(self):
+        self.vector_norms = []
+        self.rescaled_diffs = []
+        self.avg_diff_per_class = []
+        self.avg_diff_all_classes = []
+
+
+class Fumbrella:
+    def __init__(
+            self,
+            module,
+            model,
+            batch_size,
+            stage1_dropout : float,
+            stage2_dropout : float,
+            position : str = 'input',
+            stage = 1
+            ):
+        # position: 'input', 'output' 
+        self.position = position
+        self.module = module
+        self._register_hooks()
+        self._prepare_module_lists(model)
+        self.dropout_rates = {
+            1 : stage1_dropout,
+            2 : stage2_dropout
+        }
+        self.set_stage(stage)
+        self.stage1_grad = None
+        # metrics
+        self.metrics = FumbrellaMetrics(batch_size)
+
+    def _register_hooks(self):
+        if self.position == 'input':
+            self.fhook = self.module.register_forward_pre_hook(self._forward_pre_hook_fn)
+            self.bhook = self.module.register_full_backward_hook(self._backward_hook_fn)
+        elif self.position == 'output':
+            self.fhook = self.module.register_forward_hook(self._forward_hook_fn)
+            self.bhook = self.module.register_full_backward_pre_hook(self._backward_pre_hook_fn)
+
+    def _forward_pre_hook_fn(self, module, input):
+        # stage 1
+        # need to activate the gradient calculation
+        if self.stage == 1:
+            for tensor in input:
+                tensor.requires_grad = True
+            return input
+        
+    def _forward_hook_fn(self, module, input, output):
+        # stage 1
+        # need to activate the gradient calculation
+        if self.stage == 1:
+            for tensor in output:
+                tensor.requires_grad = True
+            return output
+
+    def _backward_hook_fn(self, module, grad_input, grad_output):
+        # stage 1
+        if self.stage == 1:
+            self.stage1_grad = grad_input
+        # stage 2
+        if self.stage == 2:
+            self.metrics.add(self.stage1_grad, grad_input)
+            return self.stage1_grad
+              
+    def _backward_pre_hook_fn(self, module, grad_input, grad_output):
+        # stage 1
+        if self.stage == 1:
+            self.stage1_grad = grad_output
+        # stage 2
+        if self.stage == 2:
+            self.metrics.add(self.stage1_grad, grad_output)
+            return self.stage1_grad
+        
+    def _prepare_module_lists(self, model):
+        self.dropout_modules = [m for m in model.modules() if isinstance(m, torch.nn.Dropout)]
+        self.all_parameters = [p for p in model.parameters()]
+        if self.position == 'input':
+            self.stage1_parameters = list(self.module.parameters())
+        elif self.position == 'output':
+            self.stage1_parameters = []
+
+
+    def set_stage(self, stage: int):
+        self.stage = stage
+        for m in self.dropout_modules:
+            m.p = self.dropout_rates[stage]
+
+        for p in self.all_parameters:
+            p.requires_grad = stage == 2
+        for p in self.stage1_parameters:
+            p.requires_grad = stage == 1
+
+    def compute_diff_metrics(self,accelerator):
+        return self.metrics.compute(accelerator)
+
+    def close(self):
+        self.fhook.remove()
+        self.bhook.remove()
+
+
+
+
+
 class EarlyStoppingCallback:
   def __init__(self,metric_name,direction='min',min_delta=0,patience=5):
     '''
@@ -405,125 +546,6 @@ class EarlyStoppingCallback:
         if self.wait_steps >= self.patience:
             return True
     return False
-
-def prepare_dataloaders():
-    return
-
-def prepare_fumbrella(
-        model,
-        layer,
-        batch_size,
-        catch_dropout,
-        insert_dropout,
-        original_gradient_fraction = 0
-    ):
-    hooks = {
-        'catch_hook' : Catch_Hook(layer),
-        'insert_hook' : Insert_Hook(layer,original_gradient_fraction, batch_size=batch_size)
-    }
-    # determine dropout_layers which will be activated later (skip input dropout)
-    dropout_modules = [module for module in model.modules() if isinstance(module,torch.nn.Dropout)]
-    
-    # set the dropout values for the catch run
-    if 0 <= catch_dropout <= 1:
-        catch_dropouts = [catch_dropout for _ in dropout_modules]
-    else:
-        catch_dropouts = [module.p for module in dropout_modules]
-        
-    # set the dropout values for the insertion run
-    if  0 <= insert_dropout <= 1:
-        insert_dropouts = [insert_dropout for _ in dropout_modules]
-    else: 
-        insert_dropouts = [module.p for module in dropout_modules]
-
-    # initialize the dropout to the desired value. If no insertion is done, this dropout values
-    # will be used as the standard dropout value.
-    # for module, p in zip(dropout_modules,insert_dropouts):
-    #     module.p = p
-    
-    return hooks, dropout_modules, catch_dropouts, insert_dropouts
-
-def stage1_pass(
-        accelerator,
-        model,
-        optimizer,
-        batch,
-        hooks,
-        dropout_modules,
-        catch_dropouts,
-        insert_dropouts,
-        softmax_fn,
-        modules_require_grad
-):
-    model.train()
-    # Stop syncing the gradients when freezing parts of the model.
-    with accelerator.no_sync(model):
-        # disable gradient insertion for catch run
-        hooks['insert_hook'].disable_insertion()
-
-        # set the dropout to the desired value during the catch run
-        for module, p in zip(dropout_modules,catch_dropouts):
-            module.p = p
-        
-        # # freeze all layers except for the last
-        # for named_param in model.named_parameters():
-        #     if 'classifier' not in named_param[0]:
-        #         named_param[1].requires_grad = False
-        
-        # unfreeze all layers as they have been before
-        for named_param in model.named_parameters():
-            named_param[1].requires_grad = modules_require_grad[named_param[0]]
-
-        optimizer.zero_grad()
-        outputs = model(**batch)
-        loss = outputs.loss
-        accelerator.backward(loss)
-
-        # update gradient to be inserted
-        hooks['insert_hook'].update_grad(hooks['catch_hook'].caught_grad)
-
-        # set the dropout to the desired value during the insertion run
-        for module, p in zip(dropout_modules,insert_dropouts):
-            module.p = p
-        
-        
-
-        # re-enable gradient insertion for insertion run
-        hooks['insert_hook'].enable_insertion()
-    train_stats = {
-        "train_st1_loss" : loss.detach().float(),
-        "train_st1_p_max" : softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean()
-    }
-    return train_stats
-
-def stage2_pass(
-        accelerator,
-        model,
-        optimizer,
-        batch,
-        softmax_fn,
-        gradient_accumulation_steps,
-        modules_require_grad
-    ):
-
-    # unfreeze all layers as they have been before
-    for named_param in model.named_parameters():
-        named_param[1].requires_grad = modules_require_grad[named_param[0]]
-
-    model.train()  
-    optimizer.zero_grad()
-    outputs = model(**batch)
-    loss = outputs.loss
-    # We keep track of the loss at each epoch
-    train_stats = {
-        "train_st2_loss" : loss.detach().float(),
-        "train_st2_p_max" : softmax_fn(outputs.logits.detach()).max(dim=1)[0].mean(),
-    }
-
-    loss = loss / gradient_accumulation_steps
-    accelerator.backward(loss)
-    return train_stats
-
 
 
 class TrainStatsHelper():
@@ -570,8 +592,6 @@ def evaluate_model(
         "eval_p_max": 0,
         "eval_p_var" : 0
     }
-
-    
     samples_seen = 0
     model.eval()
     for step, batch in enumerate(eval_dataloader):
@@ -969,27 +989,17 @@ def main():
     # if args.catch_dropout is None:
     #     args.catch_dropout = 0
 
-
     if use_modded:
         # layer_to_attach_to = model.dropout
         layer_to_attach_to = model.classifier
-        hooks, dropout_modules, catch_dropouts, insert_dropouts = prepare_fumbrella(
-            model=model,
-            layer=layer_to_attach_to,
-            batch_size=args.per_device_train_batch_size,
-            catch_dropout=args.catch_dropout,
-            insert_dropout=args.insert_dropout,
-            original_gradient_fraction=args.original_gradient_fraction
+        fumbrella = Fumbrella(
+            module = layer_to_attach_to,
+            model = model,
+            batch_size = args.per_device_train_batch_size,
+            stage1_dropout = args.catch_dropout,
+            stage2_dropout = args.insert_dropout,
+            position = 'output'        
         )
-        modules_require_grad_stage1 = {
-            named_param[0] : False for named_param in model.named_parameters()
-        }
-        modules_require_grad_stage1["classifier.weight"] = True
-        modules_require_grad_stage1["classifier.bias"] = True
-        # modules_require_grad_stage1["bert.pooler.dense.bias"] = True
-    modules_require_grad_stage2 = {
-        named_param[0] : named_param[1].requires_grad for named_param in model.named_parameters()
-    }   
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1062,11 +1072,10 @@ def main():
             resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
-            completed_steps = resume_step // args.gradient_accumulation_step
+            completed_steps = resume_step // args.gradient_accumulation_steps
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
-
 
     # set up training stats helper
     if args.evaluation_steps is None:
@@ -1100,28 +1109,30 @@ def main():
        
         for step, batch in enumerate(active_dataloader):
             train_stats = {}
+            optimizer.zero_grad()
+
+            # STAGE1
             if use_modded:
-                train_stats.update(stage1_pass(
-                        accelerator=accelerator,
-                        model=model,
-                        optimizer=optimizer,
-                        batch=batch,
-                        hooks=hooks,
-                        dropout_modules=dropout_modules,
-                        catch_dropouts=catch_dropouts,
-                        insert_dropouts=insert_dropouts,
-                        softmax_fn=softmax,
-                        modules_require_grad=modules_require_grad_stage1
-                ))
-            train_stats.update(stage2_pass(
-                accelerator=accelerator,
-                model=model,
-                optimizer=optimizer,
-                batch=batch,
-                softmax_fn=softmax,
-                gradient_accumulation_steps=args.gradient_accumulation_steps,
-                modules_require_grad=modules_require_grad_stage2
-            ))
+                fumbrella.set_stage(1)
+                outputs = model(**batch)
+                loss = outputs.loss
+                loss = loss / args.gradient_accumulation_steps
+                accelerator.backward(loss)
+                train_stats.update({
+                    "train_st1_loss" : loss.detach().float(),
+                    "train_st1_p_max" : softmax(outputs.logits.detach()).max(dim=1)[0].mean()
+                })
+                fumbrella.set_stage(2)
+            # STAGE 2
+            outputs = model(**batch)
+            loss = outputs.loss
+            train_stats.update({
+                "train_st2_loss" : loss.detach().float(),
+                "train_st2_p_max" : softmax(outputs.logits.detach()).max(dim=1)[0].mean(),
+            })
+
+            loss = loss / args.gradient_accumulation_steps
+            accelerator.backward(loss)
 
             train_stats_helper.add_stats(train_stats)
 
@@ -1165,7 +1176,7 @@ def main():
 
                 diff_metrics = {}
                 if use_modded:
-                    diff_metrics = hooks["insert_hook"].compute_diff_metrics(accelerator)
+                    diff_metrics = fumbrella.compute_diff_metrics(accelerator)
                     
                 if args.with_tracking:
                     accelerator.log(
@@ -1231,7 +1242,7 @@ def main():
 
             diff_metrics = {}
             if use_modded:
-                diff_metrics = hooks["insert_hook"].compute_diff_metrics(accelerator)
+                diff_metrics = fumbrella.compute_diff_metrics(accelerator)
         
             if args.with_tracking: 
                 accelerator.log(
