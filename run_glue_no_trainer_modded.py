@@ -1108,6 +1108,7 @@ def main():
        
         for step, batch in enumerate(active_dataloader):
             train_stats = {}
+            model.train()
             optimizer.zero_grad()
 
             # STAGE1
