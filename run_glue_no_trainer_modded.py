@@ -460,8 +460,7 @@ class Fumbrella:
         # stage 1
         # need to activate the gradient calculation
         if self.stage == 1:
-            for tensor in output:
-                tensor.requires_grad = True
+            output.requires_grad = True
             return output
 
     def _backward_hook_fn(self, module, grad_input, grad_output):
@@ -473,7 +472,7 @@ class Fumbrella:
             self.metrics.add(self.stage1_grad, grad_input)
             return self.stage1_grad
               
-    def _backward_pre_hook_fn(self, module, grad_input, grad_output):
+    def _backward_pre_hook_fn(self, module, grad_output):
         # stage 1
         if self.stage == 1:
             self.stage1_grad = grad_output
