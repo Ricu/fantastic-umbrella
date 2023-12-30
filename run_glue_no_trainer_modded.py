@@ -423,7 +423,7 @@ class Fumbrella:
             batch_size,
             stage1_dropout : float,
             stage2_dropout : float,
-            position : str = 'input',
+            position : str = 'output',
             stage = 1
             ):
         # position: 'input', 'output' 
