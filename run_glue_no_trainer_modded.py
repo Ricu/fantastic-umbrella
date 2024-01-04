@@ -175,10 +175,9 @@ def parse_args():
     )
     parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
     parser.add_argument(
-        "--checkpointing_steps",
-        type=str,
-        default=None,
-        help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch.",
+        "--no_checkpointing",
+        action="store_true",
+        help="Whether to enable model checkpointing.",
     )
     parser.add_argument(
         "--resume_from_checkpoint",
@@ -980,6 +979,8 @@ def main():
         pin_memory=True
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+    test_dataloader = DataLoader(test_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+
     if args.task_name == "mnli":
         eval_dataloader_mismatched = DataLoader(eval_dataset_mismatched, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
@@ -1021,12 +1022,12 @@ def main():
     # Prepare everything with our `accelerator`.
     
     if args.task_name == 'mnli':
-        model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, lr_scheduler = accelerator.prepare(
-            model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, lr_scheduler
+        model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, test_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, test_dataloader, lr_scheduler
         )
     else:
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-            model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+        model, optimizer, train_dataloader, eval_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, test_dataloader, lr_scheduler
         )
         
     # Prepare the fumbrella method
@@ -1054,11 +1055,6 @@ def main():
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    # Figure out how many steps we should save the Accelerator states
-    checkpointing_steps = args.checkpointing_steps
-    if checkpointing_steps is not None and checkpointing_steps.isdigit():
-        checkpointing_steps = int(checkpointing_steps)
-
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     experiment_config = vars(args)
@@ -1070,11 +1066,17 @@ def main():
                 run_name = "/".join(args.output_dir.split("/")[-2:])
             else:
                 run_name = "run_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        
+        if (tags:= os.getenv("WANBD_TAGS")) is None:
+            tags = []
+        else:
+            tags = json.loads(tags)
+
         accelerator.init_trackers(project_name="fantastic-umbrella",
                                   config=experiment_config,
                                   init_kwargs={"wandb": {"entity": "Ricu",
                                                          "name": run_name,
-                                                         "tags" : json.loads(os.getenv("WANBD_TAGS"))
+                                                         "tags" : tags
                                                          },
                                                })
         if accelerator.is_main_process:
@@ -1244,12 +1246,14 @@ def main():
                             )
                         )
                 # update best values
-                if args.with_tracking:
-                    for es in early_stoppings:
-                        if es.improved_metric and accelerator.is_main_process:
-                            wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
-                            wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
-                            wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
+                for es in early_stoppings:
+                    if accelerator.is_main_process and es.improved_metric:
+                        if es.metric_name == 'accuracy' and not args.no_checkpointing:
+                            accelerator.save_state("checkpoint_best_acc")
+                        if args.with_tracking:
+                                wandb_tracker.summary[f"best_{es.metric_name}"] = es.best_value
+                                wandb_tracker.summary[f"best_{es.metric_name}_step"] = es.best_step
+                                wandb_tracker.summary[f"best_{es.metric_name}_epoch"] = es.best_epoch
             
             ### Stop model if neccessary
             if accelerator.check_trigger():
@@ -1307,6 +1311,21 @@ def main():
         ### Stop model if neccessary
         if accelerator.check_trigger():
             break
+    
+    accelerator.load_state("checkpoint_best_acc")
+    model.eval()
+    for step, batch in enumerate(test_dataloader):
+        outputs = model(**batch)
+        predictions = outputs.logits.argmax(dim=-1)
+        metric.add_batch(
+            predictions=accelerator.gather(predictions),
+            references=accelerator.gather(batch["labels"]),
+        )
+
+    test_metric = metric.compute()
+    if args.with_tracking and accelerator.is_main_process:
+        for k,v in test_metric.items():
+            wandb_tracker.summary[f'test_{k}'] = v
 
     if args.with_tracking:
         accelerator.end_training()
