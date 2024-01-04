@@ -114,11 +114,6 @@ def parse_args():
         required=True,
     )
     parser.add_argument(
-        "--use_slow_tokenizer",
-        action="store_true",
-        help="If passed, will use a slow tokenizer (not backed by the 🤗 Tokenizers library).",
-    )
-    parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
         default=8,
@@ -145,12 +140,6 @@ def parse_args():
         help="Total number of training steps to perform. If provided, overrides num_train_epochs.",
     )
     parser.add_argument(
-        "--gradient_accumulation_steps",
-        type=int,
-        default=1,
-        help="Number of updates steps to accumulate before performing a backward/update pass.",
-    )
-    parser.add_argument(
         "--lr_scheduler_type",
         type=SchedulerType,
         default="linear",
@@ -169,21 +158,10 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument("--dataset_seed", type=int, default=None, help="A seed for reproducible datasets.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument(
-        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
-    )
-    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
     parser.add_argument(
         "--no_checkpointing",
         action="store_true",
         help="Whether to enable model checkpointing.",
-    )
-    parser.add_argument(
-        "--resume_from_checkpoint",
-        type=str,
-        default=None,
-        help="If the training should continue from a checkpoint folder.",
     )
     parser.add_argument(
         "--with_tracking",
@@ -229,7 +207,6 @@ def parse_args():
         default=0.999,
         help="Change the beta2 value of the AdamW optimizer.",
     )
-
     parser.add_argument(
         "--catch_dropout",
         type=float,
@@ -247,12 +224,6 @@ def parse_args():
         type=float,
         default=0,
         help="Set the minimum loss delta for the early stopping."
-    )
-    parser.add_argument(
-        "--original_gradient_fraction",
-        type=float,
-        default=0.0,
-        help="Determines the fraction of the gradient resulting from the forward pass with dropout to be inserted."
     )
     parser.add_argument(
         "--param_config_id",
@@ -286,92 +257,9 @@ def parse_args():
             extension = args.validation_file.split(".")[-1]
             assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
 
-    if args.push_to_hub:
-        assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
-
     return args
 
-class Catch_Hook():
-    def __init__(self, module):
-        self.hook = module.register_full_backward_hook(self.hook_fn)
 
-    def hook_fn(self, module, grad_input, grad_output):
-        self.caught_grad = grad_output
-
-    def close(self):
-        self.hook.remove()
-
-class Insert_Hook():
-    def __init__(self, module, insertion_enabled = False, new_grad_output=None, original_gradient_fraction=0, batch_size=32):
-        self.new_grad_output = new_grad_output
-        # use prepend=True so that this is definitely the first hook being applied
-        self.hook = module.register_full_backward_pre_hook(self.hook_fn,prepend=True)
-        self.insertion_enabled = insertion_enabled
-        assert (0 <= original_gradient_fraction <= 1), "Gradient fraction should be between 0 and 1"
-        self.original_gradient_fraction = original_gradient_fraction
-        self.vector_norms = []
-        self.rescaled_diffs = []
-        self.avg_diff_per_class = []
-        self.avg_diff_all_classes = []
-        self.batch_size = batch_size
-
-    def hook_fn(self, module, grad_output):
-
-        if self.insertion_enabled:
-            grad_diff = grad_output[0] - self.new_grad_output[0]
-            grad_diff_rescaled = grad_diff *self.batch_size
-            self.rescaled_diffs.append(grad_diff_rescaled)
-            self.vector_norms.append(torch.linalg.vector_norm(grad_diff_rescaled,dim=1))
-            self.avg_diff_per_class.append(grad_diff_rescaled.abs().mean(dim=0))
-            self.avg_diff_all_classes.append(self.avg_diff_per_class[-1].mean())
-        # simply return the previously caught grad_output
-        # this will replace the current grad_output (if prehook is used)
-            if self.original_gradient_fraction > 0:
-                ogf = self.original_gradient_fraction
-                return ogf * grad_output + (1-ogf) * self.new_grad_output
-            else:
-                return self.new_grad_output
-
-    def update_grad(self, new_grad_output):
-        self.new_grad_output = new_grad_output
-
-    def compute_diff_metrics(self,accelerator):
-        diff_metrics = {}
-        vector_norms = accelerator.gather_for_metrics(self.vector_norms)
-        if isinstance(vector_norms, list):
-            vector_norms = torch.cat(vector_norms)
-        avg_grad_diffs_per_class = accelerator.gather_for_metrics(self.avg_diff_per_class)
-        if isinstance(avg_grad_diffs_per_class, list):
-            avg_grad_diffs_per_class = torch.stack(avg_grad_diffs_per_class).mean(dim=0)
-        avg_grad_diffs_all_classes = accelerator.gather_for_metrics(self.avg_diff_all_classes)
-        if isinstance(avg_grad_diffs_all_classes, list):
-            avg_grad_diffs_all_classes = torch.stack(avg_grad_diffs_all_classes).mean()
-        self.clear_lists()
-        diff_metrics = {
-            "avg_grad_diff_all_classes" : avg_grad_diffs_all_classes,
-            "avg_grad_diff_per_class" : avg_grad_diffs_per_class,
-            "vector_norms" : vector_norms
-        }
-        return diff_metrics
-
-
-    def clear_lists(self):
-        self.vector_norms = []
-        self.rescaled_diffs = []
-        self.avg_diff_per_class = []
-        self.avg_diff_all_classes = []
-
-    def close(self):
-        self.hook.remove()
-
-    def enable_insertion(self):
-        self.insertion_enabled = True
-
-    def disable_insertion(self):
-        self.insertion_enabled = False
-
-
-import torch
 class FumbrellaMetrics():
     def __init__(self, batch_size):
         self.vector_norms = []
@@ -488,7 +376,6 @@ class Fumbrella:
         elif self.position == 'output':
             self.stage1_parameters = []
 
-
     def set_stage(self, stage: int):
         self.stage = stage
         for m in self.dropout_modules:
@@ -507,16 +394,13 @@ class Fumbrella:
         self.bhook.remove()
 
 
-
-
-
 class EarlyStoppingCallback:
   def __init__(self,metric_name,direction='min',min_delta=0,patience=5):
     '''
     `direction` is either 'min' or 'max' 
     '''
     self.metric_name=metric_name
-    if direction not in ['max','min']:
+    if direction not in {'max', 'min'}:
         raise ValueError(
             f'Invalid direction: {direction}. Should be one of: max, min'
         )
@@ -526,7 +410,7 @@ class EarlyStoppingCallback:
     self.patience=patience
     self.wait_steps=0
     self.improved_metric= False
-    self.best_value=self.sign * float('inf')
+    self.best_value=self.sign * math.inf
     self.best_epoch=0
     self.best_step=0
 
@@ -541,8 +425,8 @@ class EarlyStoppingCallback:
     else: # not improved metric
         self.wait_steps += 1
         self.improved_metric = False
-        if self.wait_steps >= self.patience:
-            return True
+    return self.wait_steps >= self.patience
+            
     return False
 
 
@@ -569,7 +453,7 @@ class TrainStatsHelper():
             self.stats_dict[stats_name] = stats_value / avg_factor
 
         if accelerator is not None and accelerator.num_processes > 1:
-            for stats_name, stats_value in self.stats_dict.item():
+            for stats_name, stats_value in self.stats_dict.items():
                 self.stats_dict[stats_name] = accelerator.gather(stats_value).mean()
 
         return self.stats_dict
@@ -635,9 +519,6 @@ def main():
 
     if args.dataset_seed is None:
         args.dataset_seed = args.seed
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_glue_no_trainer", args)
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
@@ -665,20 +546,7 @@ def main():
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            create_repo(repo_name, exist_ok=True, token=args.hub_token)
-            repo = Repository(args.output_dir, clone_from=repo_name, token=args.hub_token)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
+        if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
@@ -741,7 +609,7 @@ def main():
         attention_probs_dropout_prob = args.insert_dropout
         )
     # config = AutoConfig.from_pretrained("bert-base-uncased", num_labels=num_labels, finetuning_task=args.task_name)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=True)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -750,7 +618,6 @@ def main():
     )
     softmax = torch.nn.Softmax(dim=1)
 
-    
     # Get the metric function
     if args.task_name is not None:
         metric = evaluate.load("glue", args.task_name)
@@ -896,7 +763,7 @@ def main():
 
 
 
-        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
         if len(train_indices) >= total_batch_size: 
             train_dataset = Subset(combined_dataset, train_indices)
         else: # too few training samples to fill a batch
@@ -950,7 +817,7 @@ def main():
             ## Train dataset
             train_dataset = Subset(train_dataset,train_indices)
             logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
-            total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+            total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
             if len(train_indices) < total_batch_size: # too few training samples to fill a batch
                 logger.info(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
                 missing_factor = int(total_batch_size/len(train_indices))
@@ -1001,7 +868,7 @@ def main():
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader))
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
@@ -1049,7 +916,7 @@ def main():
         )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader))
     if overrode_max_train_steps:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
@@ -1084,46 +951,18 @@ def main():
             wandb_tracker.watch(model)
 
     # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info(f"  Total train batch size (w. parallel, distributed) = {total_batch_size}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
     starting_epoch = 0
-    # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
-            accelerator.load_state(args.resume_from_checkpoint)
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
-            dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
-
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
-            resume_step = None
-            completed_steps = starting_epoch * num_update_steps_per_epoch
-        else:
-            # need to multiply `gradient_accumulation_steps` to reflect real steps
-            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
-            starting_epoch = resume_step // len(train_dataloader)
-            resume_step -= starting_epoch * len(train_dataloader)
-            completed_steps = resume_step // args.gradient_accumulation_steps
-
-    # update the progress_bar if load from checkpoint
-    progress_bar.update(completed_steps)
 
     # set up training stats helper
     if args.evaluation_steps is None:
@@ -1149,13 +988,7 @@ def main():
     
 
     for epoch in range(starting_epoch, args.num_train_epochs):
-        if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
-            # We skip the first `n` batches in the dataloader when resuming from a checkpoint
-            active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
-        else:
-            active_dataloader = train_dataloader
-       
-        for step, batch in enumerate(active_dataloader):
+        for batch in train_dataloader:
             train_stats = {}
             model.train()
             optimizer.zero_grad()
@@ -1165,7 +998,6 @@ def main():
                 fumbrella.set_stage(1)
                 outputs = model(**batch)
                 loss = outputs.loss
-                loss = loss / args.gradient_accumulation_steps
                 accelerator.backward(loss)
                 train_stats.update({
                     "train_st1_loss" : loss.detach().float(),
@@ -1179,18 +1011,14 @@ def main():
                 "train_st2_loss" : loss.detach().float(),
                 "train_st2_p_max" : softmax(outputs.logits.detach()).max(dim=1)[0].mean(),
             })
-
-            loss = loss / args.gradient_accumulation_steps
-            accelerator.backward(loss)
-
             train_stats_helper.add_stats(train_stats)
 
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1
+            accelerator.backward(loss)
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            progress_bar.update(1)
+            completed_steps += 1
 
             if args.with_tracking:
                 accelerator.log({"learning_rate" : lr_scheduler.get_last_lr()[-1]})
