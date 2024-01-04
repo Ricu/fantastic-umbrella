@@ -1139,24 +1139,24 @@ def main():
         ### Stop model if neccessary
         if accelerator.check_trigger():
             break
-    
-    accelerator.load_state("checkpoint_best_acc")
-    model.eval()
-    for step, batch in enumerate(test_dataloader):
-        outputs = model(**batch)
-        predictions = outputs.logits.argmax(dim=-1)
-        metric.add_batch(
-            predictions=accelerator.gather(predictions),
-            references=accelerator.gather(batch["labels"]),
-        )
+    if not args.no_checkpointing:
+        accelerator.load_state("checkpoint_best_acc")
+        model.eval()
+        for step, batch in enumerate(test_dataloader):
+            outputs = model(**batch)
+            predictions = outputs.logits.argmax(dim=-1)
+            metric.add_batch(
+                predictions=accelerator.gather(predictions),
+                references=accelerator.gather(batch["labels"]),
+            )
 
-    test_metric = metric.compute()
-    if args.with_tracking and accelerator.is_main_process:
-        for k,v in test_metric.items():
-            wandb_tracker.summary[f'test_{k}'] = v
+        test_metric = metric.compute()
+        if args.with_tracking and accelerator.is_main_process:
+            for k,v in test_metric.items():
+                wandb_tracker.summary[f'test_{k}'] = v
 
-    if args.with_tracking:
-        accelerator.end_training()
+        if args.with_tracking:
+            accelerator.end_training()
 
     # if args.output_dir is not None:
     #     accelerator.wait_for_everyone()
