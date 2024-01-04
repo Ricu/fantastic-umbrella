@@ -30,7 +30,7 @@ from torch.profiler import profile, record_function, ProfilerActivity, schedule
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from huggingface_hub import Repository, create_repo
 from torch.utils.data import DataLoader, Subset, ConcatDataset
 from tqdm.auto import tqdm
@@ -855,62 +855,109 @@ def main():
             desc="Running tokenizer on dataset",
         )
     ########### Modify datasets #############
-    train_dataset = processed_datasets["train"]
-    logger.info(f'Number of training samples is: {len(train_dataset)} with {sum(train_dataset["labels"])/len(train_dataset["labels"])} of the data in class 1')
+    VARIANT = 'NEW'
 
-    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-    logger.info(f'Number of validation samples is: {len(eval_dataset)} with {sum(eval_dataset["labels"])/len(eval_dataset["labels"])} of the data in class 1')
-    
-    
-    if args.training_size != 1.0:
-        target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
-        train_indices, validation_indices, _, _ = train_test_split(
-            range(len(train_dataset)), # dummy indices
-            train_dataset["labels"], #
-            stratify = train_dataset["labels"],
-            train_size = target_train_size,
-            random_state = args.dataset_seed
-        )
+    if VARIANT == 'NEW':
+        combined_dataset = concatenate_datasets([
+            processed_datasets['train'],
+            processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+            ])
 
-        ## Validation set
-        # if training sizes are really small compared to the total number of samples (e.g. only 32 samples or 0.01 fraction),
-        # there would be relatively many validation samples being added. This could lead to one huge evaluation loop for
-        # an update only consisting 32 samples. This would incur a dramatic increase in evaluation and therefore training time,
-        # even though the benefits of having more validation samples is relatively limited. Therefore, cap the number of
-        # validation samples to be 4 times the original number of validation samples. Simply drop the rest.
-        # maximum_number_validation_samples = 4 * len(pre_eval_dataset)
-        MAXIMUM_NUMBER_VALIDATION_SAMPLES = 5000
-        n_remaining_validation_samples_capacity = max(0,MAXIMUM_NUMBER_VALIDATION_SAMPLES-len(eval_dataset))
-        n_validation_samples_to_be_added = min(len(validation_indices),n_remaining_validation_samples_capacity)
-
+        # Generate the training evaluation split
+        NUM_EVALUATION_SAMPLES = 2048 * 2
+        EVALUATION_FRAC = 0.2
         
 
-        if n_validation_samples_to_be_added > 0:
-            if n_validation_samples_to_be_added != len(validation_indices):
-                label_subset = list(np.array(train_dataset["labels"])[validation_indices])
-                # create another stratified subset of the validation indices
-                validation_indices, _, _, _ = train_test_split(
-                    validation_indices, # take subset of previous validation indices
-                    label_subset, #
-                    stratify = label_subset,
-                    train_size = n_validation_samples_to_be_added,
+        evaluation_indices, train_indices, _, _ = train_test_split(
+                range(len(combined_dataset)), # dummy indices
+                combined_dataset["labels"], #
+                stratify = combined_dataset["labels"],
+                train_size = NUM_EVALUATION_SAMPLES,
+                random_state = 0
+            )
+
+        all_labels = np.array(combined_dataset["labels"])
+        if args.training_size != 1.0:
+            target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
+            train_indices, _, _, _ = train_test_split(
+                    train_indices, # dummy indices
+                    all_labels[train_indices],# [combined_dataset["labels"][i] for i in train_indices], #
+                    stratify = all_labels[train_indices],# [combined_dataset["labels"][i] for i in train_indices],
+                    train_size = target_train_size,
                     random_state = args.dataset_seed
                 )
-            
-            eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,validation_indices)])
-            logger.info(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
-        
 
-        ## Train dataset
-        train_dataset = Subset(train_dataset,train_indices)
-        logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
+        validation_indices, test_indices, _, _ = train_test_split(
+                evaluation_indices, # dummy indices
+                all_labels[evaluation_indices], #
+                stratify = all_labels[evaluation_indices],
+                train_size = 0.5,
+                random_state = 0
+            )
+
+
+
         total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-        if len(train_indices) < total_batch_size: # too few training samples to fill a batch
-            logger.info(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
+        if len(train_indices) >= total_batch_size: 
+            train_dataset = Subset(combined_dataset, train_indices)
+        else: # too few training samples to fill a batch
             missing_factor = int(total_batch_size/len(train_indices))
-            train_dataset = ConcatDataset([train_dataset]*missing_factor)
-            logger.info(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
-    
+            train_dataset = ConcatDataset([Subset(combined_dataset,train_indices)]*missing_factor)
+        
+        
+        eval_dataset = Subset(combined_dataset,validation_indices)
+        test_dataset = Subset(combined_dataset,test_indices)
+
+    if VARIANT == 'OLD':
+        train_dataset = processed_datasets["train"]
+        eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+
+        if args.training_size != 1.0:
+            target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
+            train_indices, validation_indices, _, _ = train_test_split(
+                range(len(train_dataset)), # dummy indices
+                train_dataset["labels"], #
+                stratify = train_dataset["labels"],
+                train_size = target_train_size,
+                random_state = args.dataset_seed
+            )
+
+            ## Validation set
+            # if training sizes are really small compared to the total number of samples (e.g. only 32 samples or 0.01 fraction),
+            # there would be relatively many validation samples being added. This could lead to one huge evaluation loop for
+            # an update only consisting 32 samples. This would incur a dramatic increase in evaluation and therefore training time,
+            # even though the benefits of having more validation samples is relatively limited. Therefore, cap the number of
+            # validation samples to be 4 times the original number of validation samples. Simply drop the rest.
+            # maximum_number_validation_samples = 4 * len(pre_eval_dataset)
+            MAXIMUM_NUMBER_VALIDATION_SAMPLES = 5000
+            n_remaining_validation_samples_capacity = max(0,MAXIMUM_NUMBER_VALIDATION_SAMPLES-len(eval_dataset))
+            n_validation_samples_to_be_added = min(len(validation_indices),n_remaining_validation_samples_capacity)
+
+            if n_validation_samples_to_be_added > 0:
+                if n_validation_samples_to_be_added != len(validation_indices):
+                    label_subset = list(np.array(train_dataset["labels"])[validation_indices])
+                    # create another stratified subset of the validation indices
+                    validation_indices, _, _, _ = train_test_split(
+                        validation_indices, # take subset of previous validation indices
+                        label_subset, #
+                        stratify = label_subset,
+                        train_size = n_validation_samples_to_be_added,
+                        random_state = args.dataset_seed
+                    )
+                
+                eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,validation_indices)])
+                logger.info(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
+            
+            ## Train dataset
+            train_dataset = Subset(train_dataset,train_indices)
+            logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
+            total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+            if len(train_indices) < total_batch_size: # too few training samples to fill a batch
+                logger.info(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
+                missing_factor = int(total_batch_size/len(train_indices))
+                train_dataset = ConcatDataset([train_dataset]*missing_factor)
+                logger.info(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
+        
 
     if args.task_name == "mnli":
         eval_dataset_mismatched = processed_datasets["validation_mismatched"]
