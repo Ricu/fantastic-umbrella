@@ -1095,7 +1095,7 @@ def main():
 
         
         # Do additional evaluation if final epoch and have some remaining steps
-        if (epoch == args.num_train_epochs-1) and (remaining_steps := completed_steps%args.evaluation_steps != 0):
+        if (epoch == args.num_train_epochs-1) and ((remaining_steps := completed_steps%args.evaluation_steps) != 0):
             # collect validation results
             validation_stats = evaluate_model(
                 model=model,
