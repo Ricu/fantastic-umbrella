@@ -950,7 +950,7 @@ def main():
                                                })
         if accelerator.is_main_process:
             wandb_tracker = accelerator.get_tracker("wandb").tracker
-            wandb_tracker.watch(model)
+            wandb_tracker.watch(model,log_freq=50)
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
