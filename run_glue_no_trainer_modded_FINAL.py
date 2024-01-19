@@ -18,20 +18,16 @@ import json
 import logging
 import math
 import os
-import random
 import numpy as np
-from pathlib import Path
 
 import datasets
 import evaluate
 import torch
-from torch.profiler import profile, record_function, ProfilerActivity, schedule
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from datasets import load_dataset, concatenate_datasets
-from huggingface_hub import Repository, create_repo
 from torch.utils.data import DataLoader, Subset, ConcatDataset
 from tqdm.auto import tqdm
 
@@ -51,12 +47,6 @@ from transformers import (
 )
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
-
-from dotenv import load_dotenv
-import os
-
-# load_dotenv("./.env")
-# WANDB_API_KEY = os.getenv("WANDB_API_KEY")
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.31.0.dev0")
@@ -502,7 +492,6 @@ def evaluate_model(
     validation_stats["eval_p_var"] = validation_stats["eval_p_var"] / len(eval_dataloader)
     validation_stats["eval_loss"] = validation_stats["eval_loss"] / len(eval_dataloader)
     
-
     if accelerator.num_processes > 1:
         # Calculate global metrics
         validation_stats["eval_p_max"] = accelerator.gather(validation_stats["eval_p_max"]).mean()
@@ -723,109 +712,51 @@ def main():
             desc="Running tokenizer on dataset",
         )
     ########### Modify datasets #############
-    VARIANT = 'NEW'
+    combined_dataset = concatenate_datasets([
+        processed_datasets['train'],
+        processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+        ])
 
-    if VARIANT == 'NEW':
-        combined_dataset = concatenate_datasets([
-            processed_datasets['train'],
-            processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-            ])
+    # Generate the training evaluation split
+    EVALUATION_FRAC = 0.2
+    
+    # Split between evaluation and training indices
+    evaluation_indices, train_indices, _, _ = train_test_split(
+            range(len(combined_dataset)), # dummy indices
+            combined_dataset["labels"], #
+            stratify = combined_dataset["labels"],
+            train_size = EVALUATION_FRAC,
+            random_state = 0
+        )
 
-        # Generate the training evaluation split
-        NUM_EVALUATION_SAMPLES = 2048 * 2
-        EVALUATION_FRAC = 0.2
-        
-
-        evaluation_indices, train_indices, _, _ = train_test_split(
-                range(len(combined_dataset)), # dummy indices
-                combined_dataset["labels"], #
-                stratify = combined_dataset["labels"],
-                train_size = NUM_EVALUATION_SAMPLES,
-                random_state = 0
-            )
-
-        all_labels = np.array(combined_dataset["labels"])
-        if args.training_size != 1.0:
-            target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
-            train_indices, _, _, _ = train_test_split(
-                    train_indices, # dummy indices
-                    all_labels[train_indices],# [combined_dataset["labels"][i] for i in train_indices], #
-                    stratify = all_labels[train_indices],# [combined_dataset["labels"][i] for i in train_indices],
-                    train_size = target_train_size,
-                    random_state = args.dataset_seed
-                )
-
-        validation_indices, test_indices, _, _ = train_test_split(
-                evaluation_indices, # dummy indices
-                all_labels[evaluation_indices], #
-                stratify = all_labels[evaluation_indices],
-                train_size = 0.5,
-                random_state = 0
-            )
-
-
-
-        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
-        if len(train_indices) >= total_batch_size: 
-            train_dataset = Subset(combined_dataset, train_indices)
-        else: # too few training samples to fill a batch
-            missing_factor = int(total_batch_size/len(train_indices))
-            train_dataset = ConcatDataset([Subset(combined_dataset,train_indices)]*missing_factor)
-        
-        
-        eval_dataset = Subset(combined_dataset,validation_indices)
-        test_dataset = Subset(combined_dataset,test_indices)
-
-    if VARIANT == 'OLD':
-        train_dataset = processed_datasets["train"]
-        eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-
-        if args.training_size != 1.0:
-            target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
-            train_indices, validation_indices, _, _ = train_test_split(
-                range(len(train_dataset)), # dummy indices
-                train_dataset["labels"], #
-                stratify = train_dataset["labels"],
+    all_labels = np.array(combined_dataset["labels"])
+    if args.training_size != 1.0: # create subset of complete training set if desired
+        target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
+        train_indices, _, _, _ = train_test_split(
+                train_indices, # dummy indices
+                all_labels[train_indices],
+                stratify = all_labels[train_indices],
                 train_size = target_train_size,
                 random_state = args.dataset_seed
             )
 
-            ## Validation set
-            # if training sizes are really small compared to the total number of samples (e.g. only 32 samples or 0.01 fraction),
-            # there would be relatively many validation samples being added. This could lead to one huge evaluation loop for
-            # an update only consisting 32 samples. This would incur a dramatic increase in evaluation and therefore training time,
-            # even though the benefits of having more validation samples is relatively limited. Therefore, cap the number of
-            # validation samples to be 4 times the original number of validation samples. Simply drop the rest.
-            # maximum_number_validation_samples = 4 * len(pre_eval_dataset)
-            MAXIMUM_NUMBER_VALIDATION_SAMPLES = 5000
-            n_remaining_validation_samples_capacity = max(0,MAXIMUM_NUMBER_VALIDATION_SAMPLES-len(eval_dataset))
-            n_validation_samples_to_be_added = min(len(validation_indices),n_remaining_validation_samples_capacity)
+    validation_indices, test_indices, _, _ = train_test_split(
+            evaluation_indices, # dummy indices
+            all_labels[evaluation_indices], #
+            stratify = all_labels[evaluation_indices],
+            train_size = 0.5,
+            random_state = 0
+        )
 
-            if n_validation_samples_to_be_added > 0:
-                if n_validation_samples_to_be_added != len(validation_indices):
-                    label_subset = list(np.array(train_dataset["labels"])[validation_indices])
-                    # create another stratified subset of the validation indices
-                    validation_indices, _, _, _ = train_test_split(
-                        validation_indices, # take subset of previous validation indices
-                        label_subset, #
-                        stratify = label_subset,
-                        train_size = n_validation_samples_to_be_added,
-                        random_state = args.dataset_seed
-                    )
-                
-                eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,validation_indices)])
-                logger.info(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
-            
-            ## Train dataset
-            train_dataset = Subset(train_dataset,train_indices)
-            logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
-            total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
-            if len(train_indices) < total_batch_size: # too few training samples to fill a batch
-                logger.info(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
-                missing_factor = int(total_batch_size/len(train_indices))
-                train_dataset = ConcatDataset([train_dataset]*missing_factor)
-                logger.info(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
-        
+    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
+    if len(train_indices) >= total_batch_size: 
+        train_dataset = Subset(combined_dataset, train_indices)
+    else: # too few training samples to fill a batch
+        missing_factor = int(total_batch_size/len(train_indices))
+        train_dataset = ConcatDataset([Subset(combined_dataset,train_indices)]*missing_factor)
+    
+    eval_dataset = Subset(combined_dataset,validation_indices)
+    test_dataset = Subset(combined_dataset,test_indices)
 
     if args.task_name == "mnli":
         eval_dataset_mismatched = processed_datasets["validation_mismatched"]
@@ -889,7 +820,6 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    
     if args.task_name == 'mnli':
         model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, test_dataloader, lr_scheduler = accelerator.prepare(
             model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, test_dataloader, lr_scheduler
@@ -901,9 +831,6 @@ def main():
         
     # Prepare the fumbrella method
     use_modded = not (args.catch_dropout is None)
-    # use_modded = True
-    # if args.catch_dropout is None:
-    #     args.catch_dropout = 0
 
     if use_modded:
         # layer_to_attach_to = model.dropout
@@ -988,7 +915,6 @@ def main():
         )
     logger.info(f"epoch initial model: {validation_stats}")
     
-
     for epoch in range(starting_epoch, args.num_train_epochs):
         for batch in train_dataloader:
             train_stats = {}

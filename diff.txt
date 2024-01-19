@@ -1,24 +1,24 @@
---- run_glue_no_trainer.py	2023-11-16 14:20:41.798000000 +0100
-+++ run_glue_no_trainer_modded.py	2024-01-12 21:39:10.070000000 +0100
-@@ -19,19 +19,25 @@
+--- run_glue_no_trainer_ORIGINAL.py	2024-01-19 15:53:10.976000000 +0100
++++ run_glue_no_trainer_modded_FINAL.py	2024-01-19 15:49:48.684000000 +0100
+@@ -18,20 +18,22 @@
+ import logging
  import math
  import os
- import random
+-import random
+-from pathlib import Path
 +import numpy as np
- from pathlib import Path
  
  import datasets
  import evaluate
  import torch
-+from torch.profiler import profile, record_function, ProfilerActivity, schedule
 +
  from accelerate import Accelerator
  from accelerate.logging import get_logger
  from accelerate.utils import set_seed
 -from datasets import load_dataset
-+from datasets import load_dataset, concatenate_datasets
- from huggingface_hub import Repository, create_repo
+-from huggingface_hub import Repository, create_repo
 -from torch.utils.data import DataLoader
++from datasets import load_dataset, concatenate_datasets
 +from torch.utils.data import DataLoader, Subset, ConcatDataset
  from tqdm.auto import tqdm
  
@@ -28,27 +28,15 @@
  import transformers
  from transformers import (
      AutoConfig,
-@@ -43,12 +49,17 @@
-     default_data_collator,
-     get_scheduler,
- )
--from transformers.utils import check_min_version, send_example_telemetry
-+from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
+@@ -46,7 +48,6 @@
+ from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
  from transformers.utils.versions import require_version
  
-+from dotenv import load_dotenv
-+import os
-+
-+# load_dotenv("./.env")
-+# WANDB_API_KEY = os.getenv("WANDB_API_KEY")
- 
+-
  # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
--check_min_version("4.36.0.dev0")
-+check_min_version("4.31.0.dev0")
+ check_min_version("4.31.0.dev0")
  
- logger = get_logger(__name__)
- 
-@@ -103,11 +114,6 @@
+@@ -103,11 +104,6 @@
          required=True,
      )
      parser.add_argument(
@@ -60,7 +48,7 @@
          "--per_device_train_batch_size",
          type=int,
          default=8,
-@@ -134,12 +140,6 @@
+@@ -134,12 +130,6 @@
          help="Total number of training steps to perform. If provided, overrides num_train_epochs.",
      )
      parser.add_argument(
@@ -73,27 +61,17 @@
          "--lr_scheduler_type",
          type=SchedulerType,
          default="linear",
-@@ -149,34 +149,19 @@
+@@ -149,24 +139,19 @@
      parser.add_argument(
          "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
      )
 -    parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
 -    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
 -    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
--    parser.add_argument(
+     parser.add_argument(
 -        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
 -    )
 -    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
-     parser.add_argument(
--        "--trust_remote_code",
--        type=bool,
--        default=False,
--        help=(
--            "Whether or not to allow for custom models defined on the Hub in their own modeling files. This option"
--            "should only be set to `True` for repositories you trust and in which you have read the code, as it will "
--            "execute code present on the Hub on your local machine."
--        ),
--    )
 -    parser.add_argument(
 -        "--checkpointing_steps",
 -        type=str,
@@ -118,16 +96,7 @@
      )
      parser.add_argument(
          "--with_tracking",
-@@ -189,7 +174,7 @@
-         default="all",
-         help=(
-             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
--            ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations. '
-+            ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations.'
-             "Only applicable when `--with_tracking` is passed."
-         ),
-     )
-@@ -198,6 +183,67 @@
+@@ -188,6 +173,67 @@
          action="store_true",
          help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
      )
@@ -195,7 +164,7 @@
      args = parser.parse_args()
  
      # Sanity checks
-@@ -211,17 +257,270 @@
+@@ -201,17 +247,269 @@
              extension = args.validation_file.split(".")[-1]
              assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
  
@@ -447,7 +416,6 @@
 +    validation_stats["eval_p_var"] = validation_stats["eval_p_var"] / len(eval_dataloader)
 +    validation_stats["eval_loss"] = validation_stats["eval_loss"] / len(eval_dataloader)
 +    
-+
 +    if accelerator.num_processes > 1:
 +        # Calculate global metrics
 +        validation_stats["eval_p_max"] = accelerator.gather(validation_stats["eval_p_max"]).mean()
@@ -472,19 +440,17 @@
  
      # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
      # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
-@@ -249,22 +548,7 @@
+@@ -239,20 +537,7 @@
  
      # Handle the repository creation
      if accelerator.is_main_process:
 -        if args.push_to_hub:
--            # Retrieve of infer repo_name
--            repo_name = args.hub_model_id
--            if repo_name is None:
--                repo_name = Path(args.output_dir).absolute().name
--            # Create repo and retrieve repo_id
--            repo_id = create_repo(repo_name, exist_ok=True, token=args.hub_token).repo_id
--            # Clone repo locally
--            repo = Repository(args.output_dir, clone_from=repo_id, token=args.hub_token)
+-            if args.hub_model_id is None:
+-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
+-            else:
+-                repo_name = args.hub_model_id
+-            create_repo(repo_name, exist_ok=True, token=args.hub_token)
+-            repo = Repository(args.output_dir, clone_from=repo_name, token=args.hub_token)
 -
 -            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
 -                if "step_*" not in gitignore:
@@ -496,15 +462,16 @@
              os.makedirs(args.output_dir, exist_ok=True)
      accelerator.wait_for_everyone()
  
-@@ -323,18 +607,50 @@
-         args.model_name_or_path,
-         num_labels=num_labels,
-         finetuning_task=args.task_name,
--        trust_remote_code=args.trust_remote_code,
--    )
--    tokenizer = AutoTokenizer.from_pretrained(
--        args.model_name_or_path, use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code
--    )
+@@ -307,14 +592,54 @@
+     #
+     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
+     # download model & vocab.
+-    config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=num_labels, finetuning_task=args.task_name)
+-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer)
++    config = AutoConfig.from_pretrained(
++        args.model_name_or_path,
++        num_labels=num_labels,
++        finetuning_task=args.task_name,
 +        hidden_dropout_prob = args.insert_dropout,
 +        attention_probs_dropout_prob = args.insert_dropout
 +        )
@@ -515,7 +482,6 @@
          from_tf=bool(".ckpt" in args.model_name_or_path),
          config=config,
          ignore_mismatched_sizes=args.ignore_mismatched_sizes,
--        trust_remote_code=args.trust_remote_code,
      )
 +    softmax = torch.nn.Softmax(dim=1)
 +
@@ -553,116 +519,58 @@
  
      # Preprocessing the datasets
      if args.task_name is not None:
-@@ -406,13 +722,115 @@
+@@ -386,13 +711,57 @@
              remove_columns=raw_datasets["train"].column_names,
              desc="Running tokenizer on dataset",
          )
 +    ########### Modify datasets #############
-+    VARIANT = 'NEW'
- 
--    train_dataset = processed_datasets["train"]
--    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-+    if VARIANT == 'NEW':
-+        combined_dataset = concatenate_datasets([
-+            processed_datasets['train'],
-+            processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-+            ])
++    combined_dataset = concatenate_datasets([
++        processed_datasets['train'],
++        processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
++        ])
 +
-+        # Generate the training evaluation split
-+        NUM_EVALUATION_SAMPLES = 2048 * 2
-+        EVALUATION_FRAC = 0.2
-+        
++    # Generate the training evaluation split
++    EVALUATION_FRAC = 0.2
++    
++    # Split between evaluation and training indices
++    evaluation_indices, train_indices, _, _ = train_test_split(
++            range(len(combined_dataset)), # dummy indices
++            combined_dataset["labels"], #
++            stratify = combined_dataset["labels"],
++            train_size = EVALUATION_FRAC,
++            random_state = 0
++        )
 +
-+        evaluation_indices, train_indices, _, _ = train_test_split(
-+                range(len(combined_dataset)), # dummy indices
-+                combined_dataset["labels"], #
-+                stratify = combined_dataset["labels"],
-+                train_size = NUM_EVALUATION_SAMPLES,
-+                random_state = 0
-+            )
-+
-+        all_labels = np.array(combined_dataset["labels"])
-+        if args.training_size != 1.0:
-+            target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
-+            train_indices, _, _, _ = train_test_split(
-+                    train_indices, # dummy indices
-+                    all_labels[train_indices],# [combined_dataset["labels"][i] for i in train_indices], #
-+                    stratify = all_labels[train_indices],# [combined_dataset["labels"][i] for i in train_indices],
-+                    train_size = target_train_size,
-+                    random_state = args.dataset_seed
-+                )
-+
-+        validation_indices, test_indices, _, _ = train_test_split(
-+                evaluation_indices, # dummy indices
-+                all_labels[evaluation_indices], #
-+                stratify = all_labels[evaluation_indices],
-+                train_size = 0.5,
-+                random_state = 0
-+            )
-+
-+
-+
-+        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
-+        if len(train_indices) >= total_batch_size: 
-+            train_dataset = Subset(combined_dataset, train_indices)
-+        else: # too few training samples to fill a batch
-+            missing_factor = int(total_batch_size/len(train_indices))
-+            train_dataset = ConcatDataset([Subset(combined_dataset,train_indices)]*missing_factor)
-+        
-+        
-+        eval_dataset = Subset(combined_dataset,validation_indices)
-+        test_dataset = Subset(combined_dataset,test_indices)
-+
-+    if VARIANT == 'OLD':
-+        train_dataset = processed_datasets["train"]
-+        eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
-+
-+        if args.training_size != 1.0:
-+            target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
-+            train_indices, validation_indices, _, _ = train_test_split(
-+                range(len(train_dataset)), # dummy indices
-+                train_dataset["labels"], #
-+                stratify = train_dataset["labels"],
++    all_labels = np.array(combined_dataset["labels"])
++    if args.training_size != 1.0: # create subset of complete training set if desired
++        target_train_size = int(args.training_size) if args.training_size > 1 else args.training_size
++        train_indices, _, _, _ = train_test_split(
++                train_indices, # dummy indices
++                all_labels[train_indices],
++                stratify = all_labels[train_indices],
 +                train_size = target_train_size,
 +                random_state = args.dataset_seed
 +            )
+ 
+-    train_dataset = processed_datasets["train"]
+-    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
++    validation_indices, test_indices, _, _ = train_test_split(
++            evaluation_indices, # dummy indices
++            all_labels[evaluation_indices], #
++            stratify = all_labels[evaluation_indices],
++            train_size = 0.5,
++            random_state = 0
++        )
 +
-+            ## Validation set
-+            # if training sizes are really small compared to the total number of samples (e.g. only 32 samples or 0.01 fraction),
-+            # there would be relatively many validation samples being added. This could lead to one huge evaluation loop for
-+            # an update only consisting 32 samples. This would incur a dramatic increase in evaluation and therefore training time,
-+            # even though the benefits of having more validation samples is relatively limited. Therefore, cap the number of
-+            # validation samples to be 4 times the original number of validation samples. Simply drop the rest.
-+            # maximum_number_validation_samples = 4 * len(pre_eval_dataset)
-+            MAXIMUM_NUMBER_VALIDATION_SAMPLES = 5000
-+            n_remaining_validation_samples_capacity = max(0,MAXIMUM_NUMBER_VALIDATION_SAMPLES-len(eval_dataset))
-+            n_validation_samples_to_be_added = min(len(validation_indices),n_remaining_validation_samples_capacity)
-+
-+            if n_validation_samples_to_be_added > 0:
-+                if n_validation_samples_to_be_added != len(validation_indices):
-+                    label_subset = list(np.array(train_dataset["labels"])[validation_indices])
-+                    # create another stratified subset of the validation indices
-+                    validation_indices, _, _, _ = train_test_split(
-+                        validation_indices, # take subset of previous validation indices
-+                        label_subset, #
-+                        stratify = label_subset,
-+                        train_size = n_validation_samples_to_be_added,
-+                        random_state = args.dataset_seed
-+                    )
-+                
-+                eval_dataset = ConcatDataset([eval_dataset,Subset(train_dataset,validation_indices)])
-+                logger.info(f'Adding {len(validation_indices)} samples to from the training data to the validation data. New number of validation samples: {len(eval_dataset)}')
-+            
-+            ## Train dataset
-+            train_dataset = Subset(train_dataset,train_indices)
-+            logger.info(f'Removed {len(validation_indices)} samples from the training data. Remaining samples: {len(train_dataset)}.')
-+            total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
-+            if len(train_indices) < total_batch_size: # too few training samples to fill a batch
-+                logger.info(f'Not enough training samples to fill a whole batch. Currently {len(train_dataset)} but require {args.per_device_train_batch_size}')
-+                missing_factor = int(total_batch_size/len(train_indices))
-+                train_dataset = ConcatDataset([train_dataset]*missing_factor)
-+                logger.info(f'Repeated training data {missing_factor} times. Training data now has {len(train_dataset)} samples.')
-+        
++    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes
++    if len(train_indices) >= total_batch_size: 
++        train_dataset = Subset(combined_dataset, train_indices)
++    else: # too few training samples to fill a batch
++        missing_factor = int(total_batch_size/len(train_indices))
++        train_dataset = ConcatDataset([Subset(combined_dataset,train_indices)]*missing_factor)
++    
++    eval_dataset = Subset(combined_dataset,validation_indices)
++    test_dataset = Subset(combined_dataset,test_indices)
 +
 +    if args.task_name == "mnli":
 +        eval_dataset_mismatched = processed_datasets["validation_mismatched"]
@@ -674,7 +582,7 @@
  
      # DataLoaders creation:
      if args.pad_to_max_length:
-@@ -426,9 +844,14 @@
+@@ -406,9 +775,14 @@
          data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=(8 if accelerator.use_fp16 else None))
  
      train_dataloader = DataLoader(
@@ -690,7 +598,7 @@
  
      # Optimizer
      # Split weights in two groups, one with weight decay and the other not.
-@@ -443,15 +866,21 @@
+@@ -423,15 +797,21 @@
              "weight_decay": 0.0,
          },
      ]
@@ -714,14 +622,13 @@
      lr_scheduler = get_scheduler(
          name=args.lr_scheduler_type,
          optimizer=optimizer,
-@@ -460,180 +889,287 @@
+@@ -440,176 +820,282 @@
      )
  
      # Prepare everything with our `accelerator`.
 -    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
 -        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
 -    )
-+    
 +    if args.task_name == 'mnli':
 +        model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, test_dataloader, lr_scheduler = accelerator.prepare(
 +            model, optimizer, train_dataloader, eval_dataloader, eval_dataloader_mismatched, test_dataloader, lr_scheduler
@@ -733,9 +640,6 @@
 +        
 +    # Prepare the fumbrella method
 +    use_modded = not (args.catch_dropout is None)
-+    # use_modded = True
-+    # if args.catch_dropout is None:
-+    #     args.catch_dropout = 0
 +
 +    if use_modded:
 +        # layer_to_attach_to = model.dropout
@@ -795,7 +699,7 @@
 +                                               })
 +        if accelerator.is_main_process:
 +            wandb_tracker = accelerator.get_tracker("wandb").tracker
-+            wandb_tracker.watch(model)
++            wandb_tracker.watch(model,log_freq=50)
  
      # Train!
 -    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -816,18 +720,14 @@
 -    # Potentially load in the weights and states from a previous save
 -    if args.resume_from_checkpoint:
 -        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
--            checkpoint_path = args.resume_from_checkpoint
+-            accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
+-            accelerator.load_state(args.resume_from_checkpoint)
 -            path = os.path.basename(args.resume_from_checkpoint)
 -        else:
 -            # Get the most recent checkpoint
 -            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
 -            dirs.sort(key=os.path.getctime)
 -            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
--            checkpoint_path = path
--            path = os.path.basename(checkpoint_path)
--
--        accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
--        accelerator.load_state(checkpoint_path)
 -        # Extract `epoch_{i}` or `step_{i}`
 -        training_difference = os.path.splitext(path)[0]
 -
@@ -839,11 +739,12 @@
 -            # need to multiply `gradient_accumulation_steps` to reflect real steps
 -            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
 -            starting_epoch = resume_step // len(train_dataloader)
--            completed_steps = resume_step // args.gradient_accumulation_steps
 -            resume_step -= starting_epoch * len(train_dataloader)
- 
+-            completed_steps = resume_step // args.gradient_accumulation_step
+-
 -    # update the progress_bar if load from checkpoint
 -    progress_bar.update(completed_steps)
+ 
 +    # set up training stats helper
 +    if args.evaluation_steps is None:
 +        args.evaluation_steps = len(train_dataloader)
@@ -866,7 +767,6 @@
 +        )
 +    logger.info(f"epoch initial model: {validation_stats}")
 +    
- 
      for epoch in range(starting_epoch, args.num_train_epochs):
 -        model.train()
 -        if args.with_tracking:
@@ -916,7 +816,7 @@
 -
 -            if isinstance(checkpointing_steps, int):
 -                if completed_steps % checkpointing_steps == 0:
--                    output_dir = f"step_{completed_steps}"
+-                    output_dir = f"step_{completed_steps }"
 -                    if args.output_dir is not None:
 -                        output_dir = os.path.join(args.output_dir, output_dir)
 -                    accelerator.save_state(output_dir)
@@ -1016,7 +916,7 @@
 -                references=references,
 +        
 +        # Do additional evaluation if final epoch and have some remaining steps
-+        if (epoch == args.num_train_epochs-1) and (remaining_steps := completed_steps%args.evaluation_steps != 0):
++        if (epoch == args.num_train_epochs-1) and ((remaining_steps := completed_steps%args.evaluation_steps) != 0):
 +            # collect validation results
 +            validation_stats = evaluate_model(
 +                model=model,
@@ -1131,7 +1031,7 @@
  
      if args.task_name == "mnli":
          # Final evaluation on mismatched validation set
-@@ -655,11 +1191,5 @@
+@@ -631,11 +1117,5 @@
          eval_metric = metric.compute()
          logger.info(f"mnli-mm: {eval_metric}")
  
